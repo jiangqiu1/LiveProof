@@ -1,0 +1,44 @@
+# 测试配置：只改数据源指向隔离测试库 liveproof_test，其余继承 application.yml
+#
+# liveproof_test 由 liveproof 的可还原备份 + db/migration 脚本构建，
+# 结构与生产一致；测试类统一用 @Transactional 回滚，不留下写入痕迹。
+spring:
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/liveproof_test?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+
+liveproof:
+  media:
+    # 测试直接读真实素材（只读），用于验证白名单与 Range
+    root: "../liveproof-demo/owned-demo"
+  ai:
+    # 测试环境强制"未配置"，保证任何用例都不会意外打到真实模型；
+    # 需要验证"已配置"分支时由 MockitoBean 替换 AiClient。
+    api-key: ""
+    max-retries: 0
+    timeout-ms: 3000
+    ffmpeg-path: "ffmpeg-not-installed-for-test"
+  polyv:
+    # 同理：测试环境强制"未配置"，任何用例都不会意外打到真实的保利威账号
+    # （.env.local 里有真实凭据，这里必须显式清空）。
+    # 需要验证"已配置"分支的用例自行用 @TestPropertySource 注入假凭据，
+    # 并用 MockitoBean 替换 PolyvSubtitleClient。
+    app-id: ""
+    app-secret: ""
+    # 点播 v2 凭据同样必须清空：否则 .env.local 里的真实 userId/secretKey/writeToken
+    # 会进测试上下文，一个误写的上传用例就会打到真实账号并消耗资源点。
+    user-id: ""
+    secret-key: ""
+    write-token: ""
+    timeout-ms: 3000
+    video-vids:
+      candidateflow-demo-nosub.mp4: "testvid_0001"
+      # 同一段演示的烧录字幕版：与 -nosub 共用同一个云端 VID（时间轴一致）
+      candidateflow-demo.mp4: "testvid_0001"
+    video-durations:
+      candidateflow-demo-nosub.mp4: 106
+      candidateflow-demo.mp4: 106
+
+logging:
+  level:
+    com.liveproof: WARN
+    org.springframework: WARN

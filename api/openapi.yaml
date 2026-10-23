@@ -1,0 +1,2554 @@
+openapi: 3.0.3
+info:
+  title: LiveProof 视频演示证据核验 API
+  version: 1.0.0
+  description: |
+    从回放里定位每一条产品承诺，检查它有没有被实际操作证明，并把尚未验证的问题转成待办。
+
+    ## 四类核验字段（相互独立，不得互相推导）
+    - '`reviewStatus`：这条人工看过没有（unreviewed / in_review / reviewed）'
+    - '`answerStatus`：视频里有没有这样说（answered / partially_answered / not_found）'
+    - '`evidenceType`：证据是什么形态（verbal_claim / specification_display / operational_evidence / unknown）'
+    - '`evidenceSufficiency`：证据够不够（not_checked / insufficient / sufficient）'
+
+    任取值的组合都**不等于「内容为真」**。`PATCH` 只更新请求中出现的字段。
+
+    ## 错误结构
+    所有错误统一为 `{"error":{"code":"...","message":"..."}}`；校验类错误额外带 `details`。
+
+servers:
+  - url: http://127.0.0.1:8080
+    description: 本地后端（旧 Node 参考实现保留在 8787，不对外）
+
+tags:
+  - name: cases
+    description: 核验用例与改判
+  - name: todos
+    description: 待办（独立持久化实体）
+  - name: materials
+    description: 素材库（保利威点播为主存储；内置示例走 /media）
+  - name: media
+    description: 演示视频与字幕
+  - name: smart-subtitles
+    description: 保利威智能字幕（云端 ASR；与本地 SRT 链路完全独立）
+  - name: ai
+    description: AI 辅助核验（只产出建议，不写库）
+  - name: reports
+    description: 复盘报告（即时生成，不落库）
+
+paths:
+  /api/materials/capabilities:
+    get:
+      tags: [materials]
+      summary: 素材库能力状态（只读）
+      description: |
+        前端据此禁用上传按钮，而不是让用户点了才失败。**不会触发任何上传或保利威调用**。
+
+        `uploadEnabled=false` 时 `POST /api/materials` 固定返回 503 `POLYV_UPLOAD_NOT_CONFIGURED`。
+      operationId: getMaterialCapabilities
+      responses:
+        '200':
+          description: 能力状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaterialCapabilities'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/materials:
+    get:
+      tags: [materials]
+      summary: 素材列表
+      description: |
+        内置示例（`storage=local`，`builtin=true`）与用户上传（`storage=polyv`）混排，
+        按创建时间倒序。响应只含素材 id 与展示用文件名，**不含任何文件系统路径**。
+      operationId: listMaterials
+      responses:
+        '200':
+          description: 素材列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Material'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [materials]
+      summary: 上传素材到保利威点播
+      description: |
+        **同步转发保利威 + 异步转码**：接口在文件转发完成后立即返回 202 + `status=transcoding`，
+        前端轮询 `GET /api/materials/{id}` 直到 `status=ready`（实测 3.4MB / 106s 视频约 25 秒）。
+
+        安全约束：
+        - 不接收客户端指定的 `vid` / 存储路径，保利威返回的 vid 由服务端保存
+        - 扩展名、魔数、大小三重校验；非法直接 422，不落库
+        - 校验失败的临时文件会清理，不留残片
+      operationId: uploadMaterial
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 视频文件（mp4）；大小上限见 `capabilities.maxBytes`
+      responses:
+        '202':
+          description: 已接收并转发完成，转码进行中
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Material'
+        '422':
+          description: |
+            文件不合规（`MATERIAL_INVALID_FILE`）或素材数量已达上限（`MATERIAL_LIMIT_EXCEEDED`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: 转发保利威失败（`POLYV_UPLOAD_FAILED`），message 不含 writeToken
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: 未配置 `POLYV_VOD_WRITE_TOKEN`（`POLYV_UPLOAD_NOT_CONFIGURED`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          description: 上传超时（`POLYV_UPLOAD_TIMEOUT`），文件未完成上传，可重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/materials/{id}:
+    get:
+      tags: [materials]
+      summary: 素材详情（轮询转码状态）
+      operationId: getMaterial
+      parameters:
+        - $ref: '#/components/parameters/MaterialId'
+      responses:
+        '200':
+          description: 素材详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Material'
+        '404':
+          description: 素材不存在（`MATERIAL_NOT_FOUND`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [materials]
+      summary: 删除素材
+      description: |
+        默认拒绝删除仍有核验事项引用的素材（409 `MATERIAL_IN_USE`）。
+        内置示例素材不可删除（409 `BUILTIN_MATERIAL`）。
+      operationId: deleteMaterial
+      parameters:
+        - $ref: '#/components/parameters/MaterialId'
+      responses:
+        '204':
+          description: 已删除
+        '404':
+          description: 素材不存在（`MATERIAL_NOT_FOUND`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: 仍被引用（`MATERIAL_IN_USE`）或内置素材（`BUILTIN_MATERIAL`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/materials/{id}/play:
+    get:
+      tags: [materials]
+      summary: 获取播放地址
+      description: |
+        返回保利威点播直链（或内置素材的 `/media/{name}` 地址），供工作台 `<video>` 使用。
+
+        **实测两处易误判（2026-10-23）**：
+        - `polyvStatus=50`（等待审核）时 `transcodeInfos[].status` 为 `"unavailable"`，
+          但 `playUrl` **已经可以 200/206 播放** —— 因此本接口照常返回地址，
+          只用 `published=false` 说明「尚未正式发布」，不阻塞播放
+        - 只返回 `format=mp4` 且 `encrypt=false` 的直链；加密地址浏览器放不了
+
+        素材未就绪（`transcoding` / `failed`）返回 409 `MATERIAL_NOT_READY`，
+        与「没有播放地址」是两件事，前端文案需区分。
+      operationId: getMaterialPlay
+      parameters:
+        - $ref: '#/components/parameters/MaterialId'
+      responses:
+        '200':
+          description: 播放信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaterialPlay'
+        '404':
+          description: 素材不存在（`MATERIAL_NOT_FOUND`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: 素材尚未就绪（`MATERIAL_NOT_READY`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: 保利威截图/查询失败（`POLYV_SNAPSHOT_FAILED` 等）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/materials/{id}/subtitle:
+    post:
+      tags: [materials]
+      summary: 为素材上传本地 SRT 字幕
+      description: |
+        与 `POST /api/smart-subtitles/tasks` 完全独立：本接口只处理人工整理的本地 SRT，
+        **不调用任何语音识别服务**。上传成功后 `srtFileName` 有值。
+      operationId: uploadMaterialSubtitle
+      parameters:
+        - $ref: '#/components/parameters/MaterialId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: SRT 字幕文件
+      responses:
+        '200':
+          description: 更新后的素材详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Material'
+        '404':
+          description: 素材不存在（`MATERIAL_NOT_FOUND`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: SRT 格式不合法（`MATERIAL_INVALID_FILE`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [materials]
+      summary: 移除素材的本地 SRT
+      description: |
+        删除字幕文件并把 `materials.srt_file_name` 真的清成 NULL。
+
+        必须用显式 `set(..., null)` 的更新：MyBatis-Plus 的 `updateById` 默认跳过 null 字段，
+        只改内存实体会出现「文件已删、登记还在」，随后字幕解析拿着一个不存在的文件名报错。
+      operationId: deleteMaterialSubtitle
+      parameters:
+        - $ref: '#/components/parameters/MaterialId'
+      responses:
+        '200':
+          description: 更新后的素材详情（`srtFileName` 为 null）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Material'
+        '404':
+          description: 素材不存在（`MATERIAL_NOT_FOUND`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/datasets:
+    get:
+      tags: [cases]
+      summary: 数据集列表及用例数
+      operationId: listDatasets
+      responses:
+        '200':
+          description: 数据集列表，cf 优先
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Dataset'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/cases:
+    get:
+      tags: [cases]
+      summary: 用例列表
+      operationId: listCases
+      parameters:
+        - name: ds
+          in: query
+          schema:
+            type: string
+            enum: [cf, lc]
+          description: 数据集标识
+        - name: materialId
+          in: query
+          schema:
+            type: string
+            maxLength: 40
+          description: 按素材收敛；缺省表示该数据集下全部素材
+          example: mat_b2197f3bb5654e65
+        - name: reviewStatus
+          in: query
+          schema:
+            $ref: '#/components/schemas/ReviewStatus'
+        - name: answerStatus
+          in: query
+          schema:
+            $ref: '#/components/schemas/AnswerStatus'
+        - name: evidenceType
+          in: query
+          schema:
+            $ref: '#/components/schemas/EvidenceType'
+        - name: evidenceSufficiency
+          in: query
+          schema:
+            $ref: '#/components/schemas/EvidenceSufficiency'
+      responses:
+        '200':
+          description: 按 startSec 升序
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CaseListItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [cases]
+      summary: 手动新增核验事项
+      description: |
+        归属由 `materialId` 决定，客户端**不能**自带 `video`（服务端按素材类型选择：
+        内置素材用文件名走 `/media`，云端素材用素材 id）。
+
+        **新行的四个核验字段由服务端固定，不接受客户端指定**：
+        - `reviewStatus = unreviewed`
+        - `answerStatus = not_found` —— 这只是**数据库占位值**，
+          产品语义是「尚未核验」，**不得**展示为「视频没有这样说」
+        - `evidenceType = unknown`
+        - `evidenceSufficiency = not_checked`
+        - `source = manual`，`id` / `createdAt` 亦由服务端生成
+
+        素材未就绪（转码中或失败）返回 409 `MATERIAL_NOT_READY`。
+      operationId: createCase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CaseCreateRequest'
+            examples:
+              minimal:
+                summary: 只填必填项
+                value:
+                  materialId: mat_b2197f3bb5654e65
+                  question: 候选人列表是否支持自定义字段
+                  claim: 支持为候选人列表添加自定义字段
+              withWindow:
+                summary: 带演示区间与人工时间点
+                value:
+                  materialId: mat_b2197f3bb5654e65
+                  question: 候选人导出是否支持批量操作
+                  claim: 支持一键导出全部候选人为 CSV
+                  startSec: 12.5
+                  endSec: 20.0
+                  timePoints: [13.2, 18.75]
+                  reasoning: 12s 处点击导出按钮
+                  limitations: 未覆盖 5000 条规模
+      responses:
+        '201':
+          description: 创建成功。四字段为服务端固定占位值，不代表已核验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseDetail'
+        '400':
+          description: |
+            参数不合法（`INVALID_PARAMETER`），例如缺少 `materialId`、
+            `startSec`/`endSec` 只填一个、`startSec > endSec`、文本超长
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: 素材尚未就绪（`MATERIAL_NOT_READY`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/cases/import/template:
+    get:
+      tags: [cases]
+      summary: 下载 CSV 导入模板
+      description: |
+        返回 UTF-8（带 BOM，Excel 直接打开不乱码）的 CSV，表头为
+        `问题,承诺,开始秒,结束秒`，附一行格式示例。
+
+        **这是用户自己整理的核验问题清单模板，不是 AI 自动生成的承诺。**
+      operationId: downloadCaseImportTemplate
+      responses:
+        '200':
+          description: CSV 附件
+          content:
+            text/csv:
+              schema:
+                type: string
+              example: |
+                问题,承诺,开始秒,结束秒
+                候选人列表是否支持自定义字段,支持为候选人列表添加自定义字段,45,58
+
+  /api/cases/import/preview:
+    post:
+      tags: [cases]
+      summary: 导入预览（解析 + 逐行校验 + 重复检测，不写库）
+      description: |
+        **不写库**。前端必须先把逐行结果展示给用户确认，再由用户点击「确认导入」
+        调用 `POST /api/cases/import`。
+
+        `duplicateCount` 统计与库内已有事项重复的行（`归一化 question + 素材` 相同）。
+        表头中保留列名（如 `id`、`reviewStatus`）会被拒绝（422 `CASE_IMPORT_RESERVED_COLUMN`），
+        避免用户以为 CSV 能指定核验字段。
+      operationId: previewCaseImport
+      parameters:
+        - $ref: '#/components/parameters/MaterialIdOptional'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: CSV 文件（UTF-8，可选 BOM）
+      responses:
+        '200':
+          description: 逐行解析结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseImportPreview'
+        '404':
+          description: 素材不存在（`MATERIAL_NOT_FOUND`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: 素材尚未就绪（`MATERIAL_NOT_READY`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: |
+            CSV 不可解析（`MATERIAL_INVALID_FILE`）或表头含保留列（`CASE_IMPORT_RESERVED_COLUMN`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/cases/import:
+    post:
+      tags: [cases]
+      summary: 执行导入
+      description: |
+        两档策略，**都不静默忽略问题行**：
+        - `strict`（默认）：存在任何非法行则**整批拒绝**，一条都不写，
+          返回 422 `CASE_IMPORT_HAS_INVALID_ROWS`，`skipped` 列出全部问题行
+        - `skip_invalid`：跳过非法行、写入合法行，并在 `skipped` 里如实列出跳过的行号与原因
+
+        导入的行与手动新增一致：`source=csv`，四个核验字段仍为服务端固定占位值。
+      operationId: importCases
+      parameters:
+        - $ref: '#/components/parameters/MaterialIdOptional'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: CSV 文件（UTF-8，可选 BOM）
+                policy:
+                  type: string
+                  enum: [strict, skip_invalid]
+                  default: strict
+                  description: 有非法行时的处理策略
+      responses:
+        '200':
+          description: 导入结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseImportResult'
+        '404':
+          description: 素材不存在（`MATERIAL_NOT_FOUND`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: 素材尚未就绪（`MATERIAL_NOT_READY`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: |
+            `strict` 下存在非法行（`CASE_IMPORT_HAS_INVALID_ROWS`，整批未写入）、
+            表头含保留列（`CASE_IMPORT_RESERVED_COLUMN`）或文件不可解析
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/cases/{id}:
+    get:
+      tags: [cases]
+      summary: 用例详情
+      operationId: getCase
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      responses:
+        '200':
+          description: 用例详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [cases]
+      summary: 人工改判（四字段独立更新）
+      description: |
+        请求体中出现的字段才会被写入，未出现的字段保持原值。
+        显式传 `null` 等同于未提供。
+        至少需要一个可更新字段，否则返回 400 `NO_UPDATABLE_FIELD`。
+        先查存在性再更新，重复提交相同值仍返回 200。
+      operationId: patchCase
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CasePatchRequest'
+            examples:
+              onlyAnswer:
+                summary: 只改回答状态
+                value:
+                  answerStatus: partially_answered
+              allFour:
+                summary: 四字段一起改
+                value:
+                  reviewStatus: reviewed
+                  answerStatus: answered
+                  evidenceType: operational_evidence
+                  evidenceSufficiency: sufficient
+      responses:
+        '200':
+          description: 更新后的完整用例详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [cases]
+      summary: 删除核验事项
+      description: |
+        默认**拒绝**删除仍有挂接待办的事项（409），避免待办变成孤儿。
+        确认要连带删除时显式传 `withTodos=true`。
+      operationId: deleteCase
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+        - name: withTodos
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: true 表示连带删除该事项下的待办
+      responses:
+        '204':
+          description: 已删除
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 仍有挂接待办且未传 `withTodos=true`（`CASE_HAS_TODOS`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/todos:
+    get:
+      tags: [todos]
+      summary: 待办列表
+      operationId: listTodos
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/TodoStatus'
+        - name: caseId
+          in: query
+          schema:
+            type: string
+            maxLength: 64
+      responses:
+        '200':
+          description: 按创建时间倒序
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Todo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [todos]
+      summary: 为用例创建待办
+      operationId: createTodo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TodoCreateRequest'
+      responses:
+        '201':
+          description: 创建成功，状态为 open，来源为 manual
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Todo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: 关联的用例不存在（`CASE_NOT_FOUND`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/todos/{id}:
+    get:
+      tags: [todos]
+      summary: 待办详情
+      operationId: getTodo
+      parameters:
+        - $ref: '#/components/parameters/TodoId'
+      responses:
+        '200':
+          description: 待办
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Todo'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [todos]
+      summary: 修改待办内容与状态
+      description: |
+        只更新出现的字段。状态与完成时间联动：
+        - 置为 `done` 且此前未完成时写入 `completedAt`
+        - 从 `done` 改为其它状态时清空 `completedAt`
+      operationId: updateTodo
+      parameters:
+        - $ref: '#/components/parameters/TodoId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TodoUpdateRequest'
+      responses:
+        '200':
+          description: 更新后的待办
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Todo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/todos/{id}/complete:
+    post:
+      tags: [todos]
+      summary: 标记完成
+      description: 写入 `completedAt`。重复调用幂等，已完成时保留原完成时间。
+      operationId: completeTodo
+      parameters:
+        - $ref: '#/components/parameters/TodoId'
+      responses:
+        '200':
+          description: 已完成状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Todo'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/subtitles:
+    get:
+      tags: [media]
+      summary: 获取本地字幕（SRT 解析为 cue）
+      description: |
+        不调用任何语音识别服务。
+
+        **本接口与 `/api/smart-subtitles/**` 完全独立**：本接口读本地人工 SRT（12 条），
+        智能字幕接口读保利威云端 ASR（同一视频 29 条）。二者互不替代、互不影响。
+
+        解析顺序（2026-10-23 审计后修正）：
+        1. 素材登记的上传字幕（`materials.srt_file_name`）——用户在素材页显式上传的那份，最优先；
+        2. 静态白名单映射（内置示例素材配套的 SRT）；
+        3. `{video}.srt`（仅接受安全字符）。都不命中则 404。
+
+        顺序不能颠倒：`cases.video` 对内置素材是白名单文件名、对云端素材是素材 id，
+        若把静态映射排在登记字幕之前，用户上传的 SRT 会被内置那份悄悄顶掉——
+        素材页显示「已上传」，工作台与 AI 核验拿到的却是另一份字幕。
+      operationId: getSubtitles
+      parameters:
+        - name: video
+          in: query
+          required: true
+          description: 视频标识：内置素材传白名单文件名，云端素材传素材 id（两种写法都要能解析到同一个素材）。
+          schema:
+            type: string
+            examples:
+              - candidateflow-demo.mp4
+              - candidateflow-demo-nosub.mp4
+      responses:
+        '200':
+          description: 字幕 cue 列表，时间为秒
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubtitleResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: 视频不在白名单或没有配套字幕（`SUBTITLE_NOT_FOUND`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 素材登记了字幕但文件缺失（`SUBTITLE_READ_FAILED`）；此时不会用别的字幕顶替
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/smart-subtitles/status:
+    get:
+      tags: [smart-subtitles]
+      summary: 智能字幕接入状态（只读）
+      description: |
+        用于判断「能不能用」以及「哪个视频配了 VID」，**不触发任何保利威调用**。
+
+        - 不回显 `appId` / `appSecret` / `sign`，只返回主机名
+        - '`configured=false` 时其余智能字幕接口固定 503 `POLYV_NOT_CONFIGURED`，不存在模拟字幕兜底'
+      operationId: getSmartSubtitleStatus
+      responses:
+        '200':
+          description: 接入状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SmartSubtitleStatus'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/smart-subtitles/tasks:
+    get:
+      tags: [smart-subtitles]
+      summary: 本地任务登记列表（只读，不查云端）
+      description: |
+        `video` 过滤除了精确匹配，还会带上**同一 VID** 的登记行：
+        同一段演示的烧录字幕版与无字幕版共用同一个云端视频，任务只登记一次，
+        两个素材都必须能查到它。响应里的 `video` 是任务实际登记所在的素材名。
+      operationId: listSmartSubtitleTasks
+      parameters:
+        - name: video
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 128
+          description: 按视频标识过滤
+      responses:
+        '200':
+          description: 任务列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SmartSubtitleTask'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [smart-subtitles]
+      summary: 创建智能字幕任务或复用既有任务
+      description: |
+        **防重复创建**：同一 `(video, vid)` 已有 created / processing / ready 状态的任务时直接返回既有任务
+        （`reused=true`），不调用创建接口、不消耗资源点。数据库唯一键 `uk_polyv_video_vid` 是并发下的最终保障。
+
+        `vid` 只能来自服务端配置映射，客户端不能指定，URL 与响应中都不出现凭据。
+        `language` 缺省取服务端配置，必须是受支持的语言，不做猜测。
+
+        创建成功后本地状态为 `created`（尚未向云端查询过）。
+      operationId: createSmartSubtitleTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SmartSubtitleCreateRequest'
+      responses:
+        '201':
+          description: 新建任务
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SmartSubtitleTask'
+        '200':
+          description: 复用既有任务（`reused=true`，未消耗资源点）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SmartSubtitleTask'
+        '400':
+          description: |
+            `INVALID_PARAMETER`（视频不在白名单 / 语言不支持）、
+            `POLYV_VID_NOT_CONFIGURED`（该视频未配置 VID）、
+            `POLYV_DURATION_NOT_CONFIGURED`（未配置时长基准，无法做越界校验）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: '`POLYV_AUTH_FAILED` / `POLYV_UPSTREAM_ERROR`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: '`POLYV_NOT_CONFIGURED` / `POLYV_QUOTA_EXHAUSTED`（资源点不足）'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          description: '`POLYV_TIMEOUT`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/smart-subtitles/tasks/adopt:
+    post:
+      tags: [smart-subtitles]
+      summary: 登记一条已经存在的云端任务（不新建任务）
+      description: |
+        用于把「平台侧已存在、但本地尚未登记」的任务纳入管理，避免为了纳管再花一次资源点。
+
+        流程：只读查询验证任务存在 → READY 时先做字幕严格校验 → 通过后写库。
+        - 任务不存在（云端 56810）→ 404 `POLYV_TASK_NOT_FOUND`，**不写库**
+        - 字幕校验不通过 → 422 `POLYV_SUBTITLE_INVALID`，**不写库**
+        - 同一 `taskId` 已登记在别的视频上 → 409 `SUBTITLE_TASK_ALREADY_BOUND`
+        - 重复登记同一 `(video, taskId)` 幂等，不产生第二条记录
+      operationId: adoptSmartSubtitleTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SmartSubtitleAdoptRequest'
+      responses:
+        '201':
+          description: 登记完成
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SmartSubtitleTask'
+        '400':
+          description: '`VALIDATION_ERROR` / `INVALID_PARAMETER` / `POLYV_VID_NOT_CONFIGURED` / `POLYV_DURATION_NOT_CONFIGURED`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: '`POLYV_TASK_NOT_FOUND`（云端无此任务）'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: '`SUBTITLE_TASK_ALREADY_BOUND`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: '`POLYV_SUBTITLE_INVALID`（云端字幕未通过校验）'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: '`POLYV_AUTH_FAILED` / `POLYV_UPSTREAM_ERROR`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: '`POLYV_NOT_CONFIGURED` / `POLYV_QUOTA_EXHAUSTED`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          description: '`POLYV_TIMEOUT`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/smart-subtitles/tasks/{taskId}:
+    get:
+      tags: [smart-subtitles]
+      summary: 查询任务状态（真实复查云端一次）
+      description: |
+        每次调用都会向保利威发起一次只读查询（不消耗资源点），并更新本地登记表。
+
+        - '`processing`（云端 56812）：仍在生成，返回 200 + `status=processing`，**不是错误**'
+        - '`ready`：云端返回字幕且通过本地校验'
+        - '`not_found`（云端 56810）：返回 404 `POLYV_TASK_NOT_FOUND`，同时把 `not_found` 落库'
+        - 其余失败：返回对应错误，同时把 `failed` 与脱敏后的 `errorCode`/`errorMessage` 落库
+        - 本地未登记该 taskId → 404 `SUBTITLE_TASK_NOT_FOUND`
+      operationId: refreshSmartSubtitleTask
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9]{1,19}$'
+          example: '522143'
+      responses:
+        '200':
+          description: 任务状态（`created` / `processing` / `ready`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SmartSubtitleTask'
+        '404':
+          description: '`SUBTITLE_TASK_NOT_FOUND` / `POLYV_TASK_NOT_FOUND`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: '`POLYV_SUBTITLE_INVALID`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: '`POLYV_NOT_CONFIGURED` / `POLYV_QUOTA_EXHAUSTED`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          description: '`POLYV_TIMEOUT`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/smart-subtitles/tasks/{taskId}/cues:
+    get:
+      tags: [smart-subtitles]
+      summary: 取回规范化字幕（毫秒已转秒）
+      description: |
+        时间换算：`startSec = start / 1000`，保留 3 位小数。**不是**把毫秒当秒。
+
+        严格校验（任一失败即 422 `POLYV_SUBTITLE_INVALID`，不做"跳过坏数据"容错）：
+        文本非空、`0 ≤ start < end`、时间顺序递增、相邻重叠不超过 50ms、
+        结束时间不超过视频时长 + 1s（配置时长常被截断成整数）。
+
+        `from` / `to` 按**时间区间重叠**筛选（`cue.endSec >= from && cue.startSec <= to`），
+        不是"完整包含"。原因：云端 29 条与本地 12 条粒度不同，一条本地字幕常被拆成 2–3 条云端 cue，
+        用包含口径会在窗口边界静默丢句。
+
+        云端仍生成中 → 409 `POLYV_TASK_PROCESSING`，不返回空数组冒充结果。
+      operationId: getSmartSubtitleCues
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9]{1,19}$'
+          example: '522143'
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: number
+            format: double
+            minimum: 0
+          description: 时间窗起点（秒），缺省表示不限
+          example: 46.0
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: number
+            format: double
+            minimum: 0
+          description: 时间窗终点（秒），缺省表示不限；小于 from 返回 400
+          example: 48.0
+      responses:
+        '200':
+          description: 规范化字幕
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SmartSubtitleCues'
+        '400':
+          description: '`INVALID_PARAMETER`（from/to 非法或 to < from）'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: '`SUBTITLE_TASK_NOT_FOUND` / `POLYV_TASK_NOT_FOUND`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: '`POLYV_TASK_PROCESSING`（字幕仍在生成中）'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: '`POLYV_SUBTITLE_INVALID`（字幕未通过校验，已把 failed 落库）'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: '`POLYV_NOT_CONFIGURED` / `POLYV_QUOTA_EXHAUSTED`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          description: '`POLYV_TIMEOUT`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /media/{name}:
+    get:
+      tags: [media]
+      summary: 演示视频流（支持 Range）
+      description: |
+        仅白名单内文件可达：`candidateflow-demo.mp4`、`candidateflow-demo-nosub.mp4`。
+        带第三方水印的 `demo-video.mp4` 与 `capture/` 中间产物固定 404。
+
+        行为：
+        - 无 `Range`：200 + 全量 `Content-Length`
+        - 单段 `Range`：206 + `Content-Range` + 精确 `Content-Length`
+        - 越界/非法 `Range`：416 + `Content-Range: bytes */total`
+        - 多段 `Range`：按 RFC 9110 忽略分段，返回 200 全量
+      operationId: getMedia
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+            enum:
+              - candidateflow-demo.mp4
+              - candidateflow-demo-nosub.mp4
+        - name: Range
+          in: header
+          required: false
+          schema:
+            type: string
+          example: bytes=0-1023
+      responses:
+        '200':
+          description: 全量视频
+          headers:
+            Accept-Ranges:
+              schema:
+                type: string
+              description: 固定为 `bytes`
+            Content-Length:
+              schema:
+                type: integer
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: 分段内容
+          headers:
+            Content-Range:
+              schema:
+                type: string
+              example: bytes 0-1023/3605039
+            Content-Length:
+              schema:
+                type: integer
+            Accept-Ranges:
+              schema:
+                type: string
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: 不在白名单或文件缺失（`MEDIA_NOT_FOUND`），响应体不含文件系统路径
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '416':
+          description: 请求的字节范围不可满足（`RANGE_NOT_SATISFIABLE`）
+          headers:
+            Content-Range:
+              schema:
+                type: string
+              example: bytes */3605039
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/ai/status:
+    get:
+      tags: [ai]
+      summary: AI 能力状态（只读）
+      description: |
+        用于前端展示「未配置」而不是发起请求。**不会触发任何模型调用**。
+        `configured=false` 时，核验接口固定返回 503 `AI_NOT_CONFIGURED`，不存在模拟兜底。
+      operationId: getAiStatus
+      responses:
+        '200':
+          description: 能力状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AiStatus'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/cases/{id}/ai-review:
+    post:
+      tags: [ai]
+      summary: 对单条用例发起 AI 辅助核验
+      description: |
+        一次请求 = 一次真实模型调用（无请求体，客户端不能指定视频或服务器路径）。
+
+        流程：读取用例 → 用字幕定位候选区间（必要时检索区间外相关字幕并标注）
+        → 提取少量关键帧 → 调模型 → **结构化校验与安全规范化**。
+
+        `subtitleSource` 决定用哪份字幕定位证据：
+        - `local`（默认）：本地 SRT，与接入云端前行为完全一致
+        - `cloud`：保利威智能字幕；若该视频没有就绪任务 →
+          409 `SMART_SUBTITLE_NOT_READY`，**不会**退化成"无字幕分析"
+
+        约束：
+        - 响应中**不含** `reviewStatus`；本接口不写数据库
+        - 枚举取值非法、结构非法 → 422 `AI_INVALID_RESPONSE`（不做猜测性映射）
+        - 越界或无法对应真实字幕/关键帧的时间点会被丢弃，并写入 `normalizationNotes`
+        - 未提取到关键帧时 `context.visionUsed=false` 且 `context.frameNote` 说明原因
+        - `context.subtitleSource` 会回传本次实际使用的来源，便于核对
+      operationId: reviewCaseWithAi
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+        - name: subtitleSource
+          in: query
+          required: false
+          description: 证据定位用的字幕来源，缺省 `local`；其它取值 400 `INVALID_PARAMETER`
+          schema:
+            $ref: '#/components/schemas/SubtitleSource'
+      responses:
+        '200':
+          description: 建议（建议不等于结论，需人工采纳后另行走 PATCH 保存）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AiReviewResponse'
+        '400':
+          description: '`INVALID_PARAMETER`（subtitleSource 非法）'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: '`SMART_SUBTITLE_NOT_READY`（要求云端字幕但该视频没有就绪任务）'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: 模型返回无法安全解析（`AI_INVALID_RESPONSE`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: 模型服务限流（`AI_RATE_LIMITED`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: 上游失败或鉴权失败（`AI_UPSTREAM_ERROR` / `AI_AUTH_FAILED`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: 运行时未配置密钥（`AI_NOT_CONFIGURED`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          description: 模型调用超时（`AI_TIMEOUT`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/reports/review:
+    post:
+      tags: [reports]
+      summary: 生成复盘报告（Markdown）
+      description: |
+        统计与逐项事实全部由服务端按数据库**已保存**记录计算；未保存的编辑态、未采纳的 AI 建议不计入。
+
+        配置了模型密钥时额外调用一次模型做归纳（`aiUsed=true`，正文单独标注），
+        其输出中无法与事实核对数字的句子会被过滤，并在 `notes` 中说明。
+        未配置时仍返回完整事实报告（`aiUsed=false`），不返回假报告。
+      operationId: generateReviewReport
+      parameters:
+        - name: ds
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 32
+            pattern: '^[A-Za-z0-9_-]+$'
+          description: 数据集；缺省表示全部数据集
+          example: cf
+        - name: materialId
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 40
+            pattern: '^[A-Za-z0-9_-]+$'
+          description: |
+            只统计该素材下的核验事项与待办；缺省表示数据集内全部素材。
+            传值时 `datasetLabel` 变为「文件名（单素材复盘）」，正文范围说明同步收敛。
+          example: mat_b2197f3bb5654e65
+      responses:
+        '200':
+          description: 报告
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewReport'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/reports/review.md:
+    get:
+      tags: [reports]
+      summary: 下载复盘报告 Markdown
+      description: |
+        与 `POST /api/reports/review` 内容一致，直接以 `text/markdown` + `Content-Disposition: attachment` 返回。
+
+        **注意**：每次请求都会重新生成（配置了密钥时会再触发一次模型归纳），
+        前端正常路径应使用 POST 的返回内容在本地下载，避免重复消耗额度。
+      operationId: downloadReviewReport
+      parameters:
+        - name: ds
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 32
+          example: cf
+        - name: materialId
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 40
+          example: mat_b2197f3bb5654e65
+      responses:
+        '200':
+          description: Markdown 附件
+          content:
+            text/markdown:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  parameters:
+    CaseId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 64
+      example: cf-capacity-5000
+    TodoId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    MaterialId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 40
+        pattern: '^[A-Za-z0-9_-]+$'
+      description: 素材 id（服务器生成，不接受客户端自定义）
+      example: mat_b2197f3bb5654e65
+    MaterialIdOptional:
+      name: materialId
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 40
+        pattern: '^[A-Za-z0-9_-]+$'
+      description: 导入事项的归属素材；缺省时按内置示例素材处理
+      example: mat_b2197f3bb5654e65
+
+  schemas:
+    MaterialStorage:
+      type: string
+      description: |
+        `local` 内置示例（走 `/media` 与 FFmpeg，不入保利威）；
+        `polyv` 用户上传的保利威点播素材
+      enum: [local, polyv]
+
+    MaterialStatus:
+      type: string
+      description: |
+        `transcoding` 保利威转码中（对应 polyvStatus 10/20）；
+        `ready` 可用（50 等待审核 / 60、61 已发布）；
+        `failed` 转码失败（40/51）；`deleted` 已删除
+      enum: [transcoding, ready, failed, deleted]
+
+    Material:
+      type: object
+      required: [id, storage, builtin, status, published]
+      properties:
+        id:
+          type: string
+          example: mat_b2197f3bb5654e65
+        storage:
+          $ref: '#/components/schemas/MaterialStorage'
+        originalName:
+          type: string
+          nullable: true
+          description: 用户上传时的原始文件名，仅作展示
+          example: candidateflow-demo.mp4
+        fileName:
+          type: string
+          nullable: true
+          description: 内置素材的本地文件名（配合 `/media/{name}`）；云端素材为 null
+          example: candidateflow-demo.mp4
+        builtin:
+          type: boolean
+          description: true 表示项目自带的示例素材，不可删除
+        status:
+          $ref: '#/components/schemas/MaterialStatus'
+        polyvStatus:
+          type: integer
+          nullable: true
+          description: 保利威原始状态码，便于排查；`local` 素材为 null
+          example: 50
+        published:
+          type: boolean
+          description: |
+            保利威是否已发布（60/61）。`polyvStatus=50`（等待审核）时为 false，
+            但 **playUrl 已经可播** —— 前端据此提示，不得据此禁用播放
+        durationSec:
+          type: number
+          format: double
+          nullable: true
+          example: 106.47
+        sizeBytes:
+          type: integer
+          format: int64
+          nullable: true
+          example: 3591967
+        width:
+          type: integer
+          nullable: true
+          example: 1920
+        height:
+          type: integer
+          nullable: true
+          example: 1080
+        srtFileName:
+          type: string
+          nullable: true
+          description: 已上传的本地 SRT 文件名；null 表示未上传。与云端智能字幕无关
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    MaterialCapabilities:
+      type: object
+      required: [uploadEnabled, vodConfigured, maxBytes, maxCount]
+      properties:
+        uploadEnabled:
+          type: boolean
+          description: 是否配置了 `POLYV_VOD_WRITE_TOKEN`；false 时上传固定 503
+        vodConfigured:
+          type: boolean
+          description: 点播读接口（userid / secretkey）是否可用
+        maxBytes:
+          type: integer
+          format: int64
+          example: 209715200
+        maxCount:
+          type: integer
+          example: 20
+
+    MaterialPlay:
+      type: object
+      required: [materialId, playUrl, published]
+      properties:
+        materialId:
+          type: string
+          example: mat_b2197f3bb5654e65
+        playUrl:
+          type: string
+          format: uri
+          description: 可直接给 `<video>` 的直链（mp4 且未加密）
+        durationSec:
+          type: number
+          format: double
+          nullable: true
+        published:
+          type: boolean
+          description: false 表示仍在保利威审核中，地址可用但未正式发布
+
+    CaseCreateRequest:
+      type: object
+      required: [materialId, question, claim]
+      description: |
+        只接收内容字段。`reviewStatus` / `answerStatus` / `evidenceType` /
+        `evidenceSufficiency` / `source` / `id` / `createdAt` 一律由服务端决定，
+        在请求体中出现会被忽略。
+      properties:
+        materialId:
+          type: string
+          maxLength: 40
+          description: 归属素材，必填。素材未就绪返回 409 `MATERIAL_NOT_READY`
+          example: mat_b2197f3bb5654e65
+        question:
+          type: string
+          maxLength: 500
+          description: 待核验问题
+          example: 候选人列表是否支持自定义字段
+        claim:
+          type: string
+          maxLength: 500
+          description: 产品承诺原文
+          example: 支持为候选人列表添加自定义字段
+        startSec:
+          type: number
+          format: double
+          nullable: true
+          minimum: 0
+          maximum: 7200
+          description: 演示区间起点。与 `endSec` 必须成对出现或都不填
+        endSec:
+          type: number
+          format: double
+          nullable: true
+          minimum: 0
+          maximum: 7200
+          description: 演示区间终点，不得早于 `startSec`
+        reasoning:
+          type: string
+          maxLength: 1000
+          nullable: true
+          description: 核验依据（可留空，核验时再补）
+        limitations:
+          type: string
+          maxLength: 1000
+          nullable: true
+          description: 局限与风险（可留空）
+        timePoints:
+          type: array
+          description: 人工标记的关联时间点（秒）。与 startSec/endSec 无关，不互相推导
+          items:
+            type: number
+            format: double
+            minimum: 0
+            maximum: 7200
+
+    CaseImportRow:
+      type: object
+      required: [line, problems]
+      properties:
+        line:
+          type: integer
+          description: CSV 行号（含表头，从 1 开始），便于用户在表格软件里定位
+          example: 2
+        question:
+          type: string
+          nullable: true
+          description: 解析失败时为 null
+        claim:
+          type: string
+          nullable: true
+        startSec:
+          type: number
+          format: double
+          nullable: true
+        endSec:
+          type: number
+          format: double
+          nullable: true
+        problems:
+          type: array
+          description: 空数组表示该行可以导入
+          items:
+            type: string
+          example: []
+
+    CaseImportPreview:
+      type: object
+      required: [materialId, totalRows, validCount, invalidCount, duplicateCount, rows]
+      properties:
+        materialId:
+          type: string
+        totalRows:
+          type: integer
+          example: 2
+        validCount:
+          type: integer
+          example: 2
+        invalidCount:
+          type: integer
+          description: 含与库内重复的行
+          example: 0
+        duplicateCount:
+          type: integer
+          description: 与库内已有事项重复（归一化 question + 素材 相同）的行数
+          example: 0
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/CaseImportRow'
+        headers:
+          type: array
+          description: CSV 表头原样回显，便于前端展示列映射
+          items:
+            type: string
+          example: [问题, 承诺, 开始秒, 结束秒]
+        unmappedColumns:
+          type: array
+          description: 表头中未被识别、将被忽略的列名
+          items:
+            type: string
+
+    CaseImportResult:
+      type: object
+      required: [materialId, imported, skippedCount, skipped, policy]
+      properties:
+        materialId:
+          type: string
+        imported:
+          type: integer
+          description: 实际写入的条数（`strict` 拒绝时为 0）
+          example: 2
+        skippedCount:
+          type: integer
+          example: 0
+        skipped:
+          type: array
+          description: 跳过的行号与原因；`strict` 整批拒绝时包含全部非法行
+          items:
+            type: object
+            required: [line, problems]
+            properties:
+              line:
+                type: integer
+              problems:
+                type: array
+                items:
+                  type: string
+        created:
+          type: array
+          items:
+            $ref: '#/components/schemas/CaseListItem'
+        policy:
+          type: string
+          enum: [strict, skip_invalid]
+
+    ReviewStatus:
+      type: string
+      description: 流程进度，只描述人工看过没有，不得由其它字段推断
+      enum: [unreviewed, in_review, reviewed]
+
+    AnswerStatus:
+      type: string
+      description: 视频里有没有这样说，不等于内容为真
+      enum: [answered, partially_answered, not_found]
+
+    EvidenceType:
+      type: string
+      description: 证据形态。`unknown` 是合法值，表示待人工确认，禁止自动推断
+      enum: [verbal_claim, specification_display, operational_evidence, unknown]
+
+    EvidenceSufficiency:
+      type: string
+      description: 证据充分性，与证据形态是两个独立维度
+      enum: [not_checked, insufficient, sufficient]
+
+    TodoStatus:
+      type: string
+      enum: [open, in_progress, done, cancelled]
+
+    TodoSource:
+      type: string
+      description: manual 人工新建；derived_from_case 由历史 follow_up_required 迁移派生
+      enum: [manual, derived_from_case]
+
+    Dataset:
+      type: object
+      required: [id, label, count]
+      properties:
+        id:
+          type: string
+          example: cf
+        label:
+          type: string
+          example: CandidateFlow 招聘管理系统（自制）
+        count:
+          type: integer
+          example: 6
+
+    CaseListItem:
+      type: object
+      required:
+        - id
+        - ds
+        - startSec
+        - endSec
+        - reviewStatus
+        - answerStatus
+        - evidenceType
+        - evidenceSufficiency
+      properties:
+        id:
+          type: string
+          example: cf-capacity-5000
+        ds:
+          type: string
+          enum: [cf, lc]
+        question:
+          type: string
+          nullable: true
+        claim:
+          type: string
+          nullable: true
+        video:
+          type: string
+          nullable: true
+          description: 媒体引用名。内置素材为文件名（配合 `/media/{name}`），云端素材为素材 id
+        materialId:
+          type: string
+          nullable: true
+          description: 归属素材 id；旧数据可能为 null
+          example: mat_b2197f3bb5654e65
+        source:
+          type: string
+          description: 事项来源。`manual` 手动新增、`csv` 批量导入、`sample` 项目自带示例数据
+          enum: [manual, csv, sample]
+          example: csv
+        startSec:
+          type: number
+          format: double
+          nullable: true
+          description: 秒。**必须是 JSON number，不得返回字符串**
+          example: 53.684
+        endSec:
+          type: number
+          format: double
+          nullable: true
+          example: 61.533
+        reviewStatus:
+          $ref: '#/components/schemas/ReviewStatus'
+        answerStatus:
+          $ref: '#/components/schemas/AnswerStatus'
+        evidenceType:
+          $ref: '#/components/schemas/EvidenceType'
+        evidenceSufficiency:
+          $ref: '#/components/schemas/EvidenceSufficiency'
+        followUpRequired:
+          type: boolean
+          description: 旧字段，仅作兼容展示；待办以 `/api/todos` 为准
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 事项创建时间；项目自带示例数据可能为 null
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    CaseDetail:
+      allOf:
+        - $ref: '#/components/schemas/CaseListItem'
+        - type: object
+          required: [frames, legacyEvidenceStatus]
+          properties:
+            legacyEvidenceStatus:
+              type: string
+              nullable: true
+              deprecated: true
+              description: 旧模型字段（证据形态与充分性混在一个枚举里）。只读，不得据此推导新四字段
+            reasoning:
+              type: string
+              nullable: true
+            limitations:
+              type: string
+              nullable: true
+            timePoints:
+              type: array
+              description: >-
+                人工标记的关联时间点（秒，升序、两位小数）。与 startSec/endSec（数据源自带的演示区间）
+                无关，二者不互相推导；未标记时为空数组。
+              items:
+                type: number
+                format: double
+                minimum: 0
+                maximum: 7200
+            frames:
+              type: array
+              items:
+                type: string
+
+    CasePatchRequest:
+      type: object
+      description: 所有字段可选、彼此独立；只更新出现的字段
+      properties:
+        reviewStatus:
+          $ref: '#/components/schemas/ReviewStatus'
+        answerStatus:
+          $ref: '#/components/schemas/AnswerStatus'
+        evidenceType:
+          $ref: '#/components/schemas/EvidenceType'
+        evidenceSufficiency:
+          $ref: '#/components/schemas/EvidenceSufficiency'
+        reasoning:
+          type: string
+          maxLength: 1000
+          nullable: true
+          description: 核验依据（自由文本）。空串表示清空；超长返回 400 `INVALID_PARAMETER`
+          example: 0:20 处导入 CSV，界面回显 3 条记录。
+        limitations:
+          type: string
+          maxLength: 1000
+          nullable: true
+          description: 局限与风险（自由文本）。空串表示清空；超长返回 400 `INVALID_PARAMETER`
+          example: 未覆盖 5000 条规模，导入耗时无法确认。
+        timePoints:
+          type: array
+          description: >-
+            人工标记的关联时间点（秒）。三态：不传该字段=保持原值；传 []=清空；传数组=整体替换。
+            服务端按两位小数升序去重后落库；超过 20 个、含 null、越界（<0 或 >7200）返回 400 `INVALID_PARAMETER`
+          maxItems: 20
+          items:
+            type: number
+            format: double
+            minimum: 0
+            maximum: 7200
+          example: [12.5, 42.08]
+
+    Todo:
+      type: object
+      required: [id, caseId, title, status, source, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        caseId:
+          type: string
+        title:
+          type: string
+        detail:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/TodoStatus'
+        source:
+          $ref: '#/components/schemas/TodoSource'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    TodoCreateRequest:
+      type: object
+      required: [caseId, title]
+      properties:
+        caseId:
+          type: string
+          maxLength: 64
+          description: 必须已存在于 cases
+          example: cf-capacity-5000
+        title:
+          type: string
+          maxLength: 255
+          example: 补一次 5000 条导入演示
+        detail:
+          type: string
+          maxLength: 5000
+          nullable: true
+
+    TodoUpdateRequest:
+      type: object
+      description: 所有字段可选，只更新出现的字段
+      properties:
+        title:
+          type: string
+          maxLength: 255
+        detail:
+          type: string
+          maxLength: 5000
+        status:
+          $ref: '#/components/schemas/TodoStatus'
+
+    SubtitleCue:
+      type: object
+      required: [index, startSec, endSec, text]
+      properties:
+        index:
+          type: integer
+          example: 1
+        startSec:
+          type: number
+          format: double
+          example: 0.481
+        endSec:
+          type: number
+          format: double
+          example: 10.061
+        text:
+          type: string
+
+    SubtitleResponse:
+      type: object
+      required: [video, subtitleFile, cueCount, cues]
+      properties:
+        video:
+          type: string
+        subtitleFile:
+          type: string
+        language:
+          type: string
+          example: zh
+        cueCount:
+          type: integer
+        cues:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubtitleCue'
+
+    SmartSubtitleTaskStatus:
+      type: string
+      description: |
+        本地登记口径的任务状态（不是平台原始字段）。
+        `ready` 只代表「拿得到字幕」，不代表字幕内容正确。
+      enum: [created, processing, ready, failed, not_found]
+
+    SubtitleSource:
+      type: string
+      description: |
+        字幕来源。两个来源返回**同一种** cue 结构（index/startSec/endSec/text），
+        来源只描述「文字从哪来」，**不描述可信度**：
+        `cloud` 同样是机器生成结果，仍须人工核对。
+
+        `local` 的 cue 由 `GET /api/subtitles` 返回（该接口保持原样，不新增字段）；
+        `cloud` 的 cue 由本组接口返回，并在响应里带 `source: cloud`。
+      enum: [local, cloud]
+      example: cloud
+
+    SmartSubtitleVideoTarget:
+      type: object
+      required: [video, vidConfigured]
+      properties:
+        video:
+          type: string
+          example: candidateflow-demo-nosub.mp4
+        vid:
+          type: string
+          nullable: true
+          description: 保利威 VID；未配置时为 null（VID 不是密钥，可对外展示）
+          example: 9df0de1ea27d2cfe18a00b5da2446660_9
+        durationSec:
+          type: number
+          format: double
+          nullable: true
+          description: 时长基准（秒），用于字幕越界校验；未配置时为 null
+          example: 106
+        vidConfigured:
+          type: boolean
+
+    SmartSubtitleStatus:
+      type: object
+      required: [configured, defaultLanguage, allowedLanguages, videos]
+      properties:
+        configured:
+          type: boolean
+          description: 运行时是否配置了 appId / appSecret
+        baseUrlHost:
+          type: string
+          description: 保利威 API 主机名（不含凭据）
+          example: api.polyv.net
+        defaultLanguage:
+          type: string
+          example: chinese
+        allowedLanguages:
+          type: array
+          items:
+            type: string
+          example: [chinese, english]
+        videos:
+          type: array
+          items:
+            $ref: '#/components/schemas/SmartSubtitleVideoTarget'
+        note:
+          type: string
+          description: 人读的接入说明，不含凭据
+
+    SmartSubtitleTask:
+      type: object
+      required: [video, vid, language, status]
+      properties:
+        id:
+          type: integer
+          format: int64
+        video:
+          type: string
+          example: candidateflow-demo-nosub.mp4
+        vid:
+          type: string
+          example: 9df0de1ea27d2cfe18a00b5da2446660_9
+        taskId:
+          type: string
+          nullable: true
+          description: 平台任务 ID（字符串，避免前端大整数精度问题）
+          example: '522143'
+        language:
+          type: string
+          example: chinese
+        status:
+          $ref: '#/components/schemas/SmartSubtitleTaskStatus'
+        videoDurationSec:
+          type: number
+          format: double
+          nullable: true
+        subtitleCount:
+          type: integer
+          nullable: true
+          description: 最后一次成功取回并通过校验的 cue 条数
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 任务创建时间；登记既有任务时为平台侧创建时间或登记时间
+        lastCheckedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 最后一次向云端查询的时间
+        lastSuccessAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 最后一次成功取回并通过校验的时间
+        errorCode:
+          type: string
+          nullable: true
+          example: POLYV_SUBTITLE_INVALID
+        errorMessage:
+          type: string
+          nullable: true
+          description: 最近一次失败说明，**已脱敏**（去掉 sign / appSecret / 32 位十六进制串）
+        reused:
+          type: boolean
+          nullable: true
+          description: 仅创建/登记接口返回；true 表示沿用既有任务、未消耗资源点。其余接口为 null
+
+    SmartSubtitleCreateRequest:
+      type: object
+      required: [video]
+      properties:
+        video:
+          type: string
+          maxLength: 128
+          description: 视频标识（必须在媒体白名单内，且已配置 VID）
+          example: candidateflow-demo-nosub.mp4
+        language:
+          type: string
+          maxLength: 32
+          description: 缺省用服务端配置的默认语言；非法取值返回 400
+          example: chinese
+
+    SmartSubtitleAdoptRequest:
+      type: object
+      required: [video, taskId]
+      properties:
+        video:
+          type: string
+          maxLength: 128
+          example: candidateflow-demo-nosub.mp4
+        taskId:
+          type: string
+          pattern: '^[0-9]{1,19}$'
+          description: 平台已存在的任务 ID；服务端会用只读接口校验其存在
+          example: '522143'
+        language:
+          type: string
+          maxLength: 32
+          example: chinese
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            可选，平台侧任务创建时间（平台接口不返回该字段，只能由登记方提供）。
+            缺省取当前时间；未来时间或早于 30 天前返回 400。
+          example: '2026-10-23T15:24:43'
+
+    SmartSubtitleCues:
+      type: object
+      required: [video, taskId, source, status, totalCueCount, cueCount, cues]
+      properties:
+        video:
+          type: string
+        vid:
+          type: string
+        taskId:
+          type: string
+        source:
+          $ref: '#/components/schemas/SubtitleSource'
+        language:
+          type: string
+        status:
+          $ref: '#/components/schemas/SmartSubtitleTaskStatus'
+        subtitleName:
+          type: string
+          nullable: true
+          example: 智能字幕
+        totalCueCount:
+          type: integer
+          description: 本次从云端取回的完整条数（过滤前）
+          example: 29
+        cueCount:
+          type: integer
+          description: 过滤后返回的条数
+          example: 3
+        windowFromSec:
+          type: number
+          format: double
+          nullable: true
+        windowToSec:
+          type: number
+          format: double
+          nullable: true
+        cues:
+          type: array
+          description: 与时间窗**有重叠**的字幕（不是完整包含）；index 已从 1 重排
+          items:
+            $ref: '#/components/schemas/SubtitleCue'
+        fetchedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    AiStatus:
+      type: object
+      required: [configured, model, endpointHost, visionEnabled, ffmpegAvailable, polyvUpload, polyvSnapshot, maxFrames]
+      properties:
+        configured:
+          type: boolean
+          description: 运行时是否配置了模型密钥
+        model:
+          type: string
+          example: deepseek-flash
+        endpointHost:
+          type: string
+          description: 模型服务主机名（不含密钥）
+          example: api.deepseek.com
+        visionEnabled:
+          type: boolean
+          description: 配置层面是否允许提交关键帧
+        ffmpegAvailable:
+          type: boolean
+          description: FFmpeg 是否可用；false 时只能基于字幕判断
+        polyvUpload:
+          type: boolean
+          description: 保利威点播写入（`POLYV_VOD_WRITE_TOKEN`）是否配置；false 时素材上传不可用
+        polyvSnapshot:
+          type: boolean
+          description: 保利威云端截图能力是否可用（缺 writeToken 时为 false，退回本地 FFmpeg 截帧）
+        maxFrames:
+          type: integer
+          example: 4
+        note:
+          type: string
+          example: AI 已配置，可结合字幕与关键帧分析
+
+    AiCueRef:
+      type: object
+      required: [index, startSec, endSec, text, outsideWindow]
+      properties:
+        index:
+          type: integer
+        startSec:
+          type: number
+          format: double
+        endSec:
+          type: number
+          format: double
+        text:
+          type: string
+        outsideWindow:
+          type: boolean
+          description: 是否位于本条事项的原始时间区间之外
+
+    AiFrameRef:
+      type: object
+      required: [sec]
+      properties:
+        sec:
+          type: number
+          format: double
+        width:
+          type: integer
+          nullable: true
+        height:
+          type: integer
+          nullable: true
+        bytes:
+          type: integer
+          nullable: true
+        dataUrl:
+          type: string
+          nullable: true
+          description: 缩略图 data URL，供人工核对「模型到底看了哪一帧」
+
+    AiEvidenceItem:
+      type: object
+      required: [startSec, endSec, supports, cannotProve, outsideWindow]
+      properties:
+        startSec:
+          type: number
+          format: double
+        endSec:
+          type: number
+          format: double
+        subtitle:
+          type: string
+          nullable: true
+        observation:
+          type: string
+          nullable: true
+        supports:
+          type: string
+          description: 该片段能支持什么结论
+        cannotProve:
+          type: string
+          description: 该片段不能证明什么
+        outsideWindow:
+          type: boolean
+          description: 由服务端根据原始时间区间判定，不采信模型自述
+        frameSec:
+          type: number
+          format: double
+          nullable: true
+          description: 对应关键帧时间点；无法对齐时为 null
+
+    AiSuggestion:
+      type: object
+      description: 模型建议。**不含 reviewStatus**，也不代表已确认
+      required:
+        - summary
+        - answerStatus
+        - evidenceType
+        - evidenceSufficiency
+        - reasoning
+        - limitations
+        - evidenceItems
+        - suggestedTimePoints
+        - unresolvedQuestions
+      properties:
+        summary:
+          type: string
+        answerStatus:
+          $ref: '#/components/schemas/AnswerStatus'
+        evidenceType:
+          $ref: '#/components/schemas/EvidenceType'
+        evidenceSufficiency:
+          $ref: '#/components/schemas/EvidenceSufficiency'
+        reasoning:
+          type: string
+        limitations:
+          type: string
+        evidenceItems:
+          type: array
+          items:
+            $ref: '#/components/schemas/AiEvidenceItem'
+        suggestedTimePoints:
+          type: array
+          description: 仅保留落在真实时长内、且能对应已提交字幕或关键帧的时间点
+          items:
+            type: number
+            format: double
+        unresolvedQuestions:
+          type: array
+          items:
+            type: string
+
+    AiContextInfo:
+      type: object
+      description: 本次分析的输入上下文，用于人工核对 AI 到底看了什么
+      required: [cuesUsed, frames, visionUsed, subtitleSource]
+      properties:
+        video:
+          type: string
+          nullable: true
+        subtitleSource:
+          $ref: '#/components/schemas/SubtitleSource'
+        durationSec:
+          type: number
+          format: double
+          nullable: true
+        subtitleFile:
+          type: string
+          nullable: true
+        totalCueCount:
+          type: integer
+        cuesUsed:
+          type: array
+          items:
+            $ref: '#/components/schemas/AiCueRef'
+        frames:
+          type: array
+          items:
+            $ref: '#/components/schemas/AiFrameRef'
+        visionUsed:
+          type: boolean
+        frameNote:
+          type: string
+          nullable: true
+          description: 未使用画面的原因
+        outsideWindowSearched:
+          type: boolean
+        model:
+          type: string
+        promptChars:
+          type: integer
+        promptTokens:
+          type: integer
+          nullable: true
+        completionTokens:
+          type: integer
+          nullable: true
+        elapsedMs:
+          type: integer
+
+    AiReviewResponse:
+      type: object
+      required: [caseId, suggestion, context, normalizationNotes]
+      properties:
+        caseId:
+          type: string
+        suggestion:
+          $ref: '#/components/schemas/AiSuggestion'
+        context:
+          $ref: '#/components/schemas/AiContextInfo'
+        normalizationNotes:
+          type: array
+          description: |
+            安全规范化的说明，例如：越界或对不上材料的时间点被丢弃、
+            候选证据超出条数上限被截断、模型漏写 limitations 或逐条说明字段（此时对应字段会写入「（模型未说明…）」而非留空）。
+            该项非空时说明模型输出被服务端改动过，人工复核需特别留意。
+          items:
+            type: string
+        generatedAt:
+          type: string
+          format: date-time
+
+    ReportStats:
+      type: object
+      description: 全部由后端按数据库真实数据计算，模型不参与
+      required: [total, reviewed, unreviewed, todoTotal]
+      properties:
+        total:
+          type: integer
+        reviewed:
+          type: integer
+        inReview:
+          type: integer
+        unreviewed:
+          type: integer
+        answered:
+          type: integer
+        partial:
+          type: integer
+        notFound:
+          type: integer
+        operational:
+          type: integer
+        specificationDisplay:
+          type: integer
+        verbalClaim:
+          type: integer
+        evidenceUnknown:
+          type: integer
+        sufficient:
+          type: integer
+        insufficient:
+          type: integer
+        notChecked:
+          type: integer
+        todoTotal:
+          type: integer
+        todoOpen:
+          type: integer
+        todoInProgress:
+          type: integer
+        todoDone:
+          type: integer
+        todoCancelled:
+          type: integer
+
+    ReviewReport:
+      type: object
+      required: [datasetId, datasetLabel, generatedAt, stats, aiUsed, markdown]
+      properties:
+        datasetId:
+          type: string
+          example: cf
+        datasetLabel:
+          type: string
+        generatedAt:
+          type: string
+          format: date-time
+        stats:
+          $ref: '#/components/schemas/ReportStats'
+        aiUsed:
+          type: boolean
+          description: 是否成功使用模型归纳；false 表示报告仅含可追溯事实
+        aiModel:
+          type: string
+          nullable: true
+        notes:
+          type: array
+          items:
+            type: string
+        markdown:
+          type: string
+          description: 本次真实生成的 Markdown 正文（非模板）
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: |
+                稳定错误码，前端据此分支，不要匹配 message 文本。
+                取值：CASE_NOT_FOUND / TODO_NOT_FOUND / MEDIA_NOT_FOUND / SUBTITLE_NOT_FOUND /
+                VALIDATION_ERROR / INVALID_JSON / INVALID_PARAMETER / MISSING_PARAMETER /
+                NO_UPDATABLE_FIELD / RANGE_NOT_SATISFIABLE / METHOD_NOT_ALLOWED /
+                NOT_FOUND / DATABASE_ERROR / INTERNAL_ERROR / SUBTITLE_READ_FAILED /
+                AI_NOT_CONFIGURED / AI_AUTH_FAILED / AI_RATE_LIMITED / AI_TIMEOUT /
+                AI_UPSTREAM_ERROR / AI_INVALID_RESPONSE /
+                POLYV_NOT_CONFIGURED / POLYV_AUTH_FAILED / POLYV_TIMEOUT / POLYV_UPSTREAM_ERROR /
+                POLYV_QUOTA_EXHAUSTED / POLYV_INVALID_VID / POLYV_TASK_NOT_FOUND /
+                POLYV_TASK_PROCESSING / POLYV_SUBTITLE_INVALID / POLYV_VID_NOT_CONFIGURED /
+                POLYV_DURATION_NOT_CONFIGURED / SUBTITLE_TASK_NOT_FOUND / SUBTITLE_TASK_ALREADY_BOUND
+              example: CASE_NOT_FOUND
+            message:
+              type: string
+              example: 用例不存在：cf-xxx
+            details:
+              type: array
+              description: 仅校验类错误返回
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    BadRequest:
+      description: 参数或请求体不合法
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: 服务内部错误（含数据库不可用），不泄露 SQL 与连接串
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

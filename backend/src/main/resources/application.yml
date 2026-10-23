@@ -1,0 +1,135 @@
+server:
+  port: 8080
+  compression:
+    enabled: true
+    mime-types: application/json
+    min-response-size: 2048
+
+spring:
+  application:
+    name: liveproof-backend
+  # 复用项目根目录既有的 .env.local（已 gitignore），避免把数据库密码抄进仓库。
+  # 该文件为 KEY=VALUE 格式，按 properties 解析；缺失时 optional 不报错，仅提示无凭据。
+  # 同时兼容从 backend/（../.env.local）与仓库根目录（./.env.local）启动。
+  config:
+    import:
+      - "optional:file:../.env.local[.properties]"
+      - "optional:file:./.env.local[.properties]"
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 注意：characterEncoding 只接受 Java 字符集名（UTF-8），写 utf8mb4 会导致
+    # "Unsupported character encoding"；connector 8.x 默认即 utf8mb4。
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:liveproof}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:}
+    hikari:
+      pool-name: liveproof-pool
+      maximum-pool-size: 8
+      minimum-idle: 2
+      # 数据库不可用时快速失败，避免请求挂起
+      connection-timeout: 3000
+      validation-timeout: 2000
+      initialization-fail-timeout: -1
+  jackson:
+    default-property-inclusion: always
+    serialization:
+      write-dates-as-timestamps: false
+    time-zone: Asia/Shanghai
+  # 上传素材直接转保利威，不落本机盘；这里只为让 Tomcat 把大文件写到临时文件
+  # （file-size-threshold: 0 = 一律落盘），再由 MultipartFile.getResource() 流式转发，
+  # 避免 200MB 读进堆。默认 1MB 会让所有真实视频直接 500。
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 210MB
+      file-size-threshold: 0
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+
+# 媒体白名单：显式枚举文件名，禁止通配符与目录路径（启动时校验）
+# 带第三方水印的 demo-video.mp4 永不放行，capture/ 中间产物一律拒绝。
+liveproof:
+  media:
+    root: "${LIVEPROOF_MEDIA_ROOT:../liveproof-demo/owned-demo}"
+    allowed-files:
+      - candidateflow-demo.mp4
+      - candidateflow-demo-nosub.mp4
+    allowed-subtitles:
+      - candidateflow-demo.srt
+    subtitle-mapping:
+      candidateflow-demo.mp4: candidateflow-demo.srt
+      candidateflow-demo-nosub.mp4: candidateflow-demo.srt
+
+  # AI 辅助核验与报告归纳。
+  # 密钥只从后端环境变量读取，绝不进前端、不进日志、不进响应。
+  # 未配置时所有 AI 接口返回 503 AI_NOT_CONFIGURED，不回退到任何模拟结果。
+  ai:
+    api-key: "${DEEPSEEK_API_KEY:}"
+    base-url: "${DEEPSEEK_BASE_URL:https://api.deepseek.com}"
+    model: "${DEEPSEEK_MODEL:deepseek-flash}"
+    timeout-ms: ${AI_TIMEOUT_MS:60000}
+    connect-timeout-ms: ${AI_CONNECT_TIMEOUT_MS:8000}
+    max-retries: ${AI_MAX_RETRIES:1}
+    max-tokens: ${AI_MAX_TOKENS:2048}
+    vision-enabled: ${AI_VISION_ENABLED:true}
+    max-frames: ${AI_MAX_FRAMES:4}
+    frame-max-width: ${AI_FRAME_MAX_WIDTH:720}
+    max-subtitle-chars: ${AI_MAX_SUBTITLE_CHARS:6000}
+    max-extra-cues: ${AI_MAX_EXTRA_CUES:3}
+    ffmpeg-timeout-ms: ${AI_FFMPEG_TIMEOUT_MS:20000}
+    # FFmpeg 不在 PATH 时用绝对路径指定
+    ffmpeg-path: "${LIVEPROOF_FFMPEG_PATH:ffmpeg}"
+
+  # 素材库（阶段三）。视频本体在保利威点播，本机只存 SRT 与素材登记。
+  materials:
+    # 仅用于本地字幕文件与将来可能的本地产物，视频不上传到这里
+    upload-dir: "${LIVEPROOF_MEDIA_UPLOAD_DIR:../liveproof-demo/uploads}"
+    max-bytes: ${LIVEPROOF_MATERIAL_MAX_BYTES:209715200}
+    max-count: ${LIVEPROOF_MATERIAL_MAX_COUNT:20}
+    srt-max-bytes: ${LIVEPROOF_MATERIAL_SRT_MAX_BYTES:1048576}
+
+  # 保利威智能字幕（vod v4）。
+  # 凭据沿用阶段一实测可用的既有键名（云直播 AppID/AppSecret 即 v4 签名身份），
+  # 只在后端内存中使用：不返回前端、不写日志、不落业务表。
+  # 未配置时所有 /api/smart-subtitles/** 返回 503 POLYV_NOT_CONFIGURED，不回退到模拟字幕。
+  polyv:
+    app-id: "${POLYV_LIVE_APP_ID:}"
+    app-secret: "${POLYV_LIVE_APP_SECRET:}"
+    # 点播 v2 凭据：素材上传、视频信息、指定时间点截图（与 v4 是两套签名）
+    user-id: "${POLYV_VOD_USER_ID:}"
+    secret-key: "${POLYV_VOD_SECRET_KEY:}"
+    write-token: "${POLYV_VOD_WRITE_TOKEN:}"
+    upload-base-url: "${POLYV_UPLOAD_BASE_URL:https://v.polyv.net}"
+    upload-timeout-ms: ${POLYV_UPLOAD_TIMEOUT_MS:600000}
+    snapshot-timeout-ms: ${POLYV_SNAPSHOT_TIMEOUT_MS:30000}
+    snapshot-poll-interval-ms: ${POLYV_SNAPSHOT_POLL_INTERVAL_MS:1000}
+    # 实测：width 超过源视频宽度会返回 "width over limit"，因此运行时取 min(本值, 源宽)
+    snapshot-width: ${POLYV_SNAPSHOT_WIDTH:720}
+    snapshot-max-times: ${POLYV_SNAPSHOT_MAX_TIMES:20}
+    base-url: "${POLYV_BASE_URL:https://api.polyv.net}"
+    connect-timeout-ms: ${POLYV_CONNECT_TIMEOUT_MS:5000}
+    timeout-ms: ${POLYV_TIMEOUT_MS:15000}
+    default-language: "${POLYV_DEFAULT_LANGUAGE:chinese}"
+    max-cues: ${POLYV_MAX_CUES:5000}
+    # 视频标识 -> VID。客户端只能按视频标识请求，不能自行指定 VID。
+    #
+    # 两个本地素材是同一段演示：时长均为 106.47s、1920x1080/30fps、时间轴一致，
+    # 差别只在于演示版把中文字幕烧进了画面。云端只上传了 -nosub 版，
+    # 因此两份素材都映射到同一个 VID：这是「同一时间轴」的映射声明，不是内容判断。
+    video-vids:
+      candidateflow-demo-nosub.mp4: "${POLYV_DEMO_VID:}"
+      candidateflow-demo.mp4: "${POLYV_DEMO_VID:}"
+    # 视频标识 -> 时长（秒），用于字幕时间越界校验。
+    video-durations:
+      candidateflow-demo-nosub.mp4: ${POLYV_DEMO_VID_DURATION:106}
+      candidateflow-demo.mp4: ${POLYV_DEMO_VID_DURATION:106}
+
+logging:
+  level:
+    com.liveproof: INFO
