@@ -319,8 +319,6 @@ onMounted(() => {
             {{ primary.material.originalName ?? primary.material.id }}
           </div>
           <div class="lp-home-project-meta">
-            <span>{{ durationLabel(primary) }}</span>
-            <span class="dot">·</span>
             <span>{{ primary.material.builtin ? '内置示例' : '保利威点播' }}</span>
             <span class="dot">·</span>
             <span>{{ primary.total }} 条核验事项</span>

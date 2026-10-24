@@ -1602,12 +1602,15 @@ a {
 }
 
 /* ---------- Hero ---------- */
+/* 页面用 margin:auto 垂直居中整组内容（不用 justify-content:center，
+   溢出时 margin-auto 不会裁掉顶部）；字号随视口等比缩放 */
 .lp-home-hero {
   flex: 0 0 auto;
+  margin-top: auto;
   display: flex;
   align-items: center;
-  gap: 32px;
-  padding: 30px 34px;
+  gap: clamp(28px, 4vw, 64px);
+  padding: clamp(30px, 3.4vw, 52px) clamp(30px, 3.6vw, 56px);
   border-radius: 14px;
   border: 1px solid #dff2ea;
   background: linear-gradient(116deg, #f1fbf7 0%, #f8fcfb 52%, var(--lp-bg) 100%);
@@ -1618,42 +1621,43 @@ a {
 }
 .lp-home-kicker {
   display: inline-block;
-  font-size: 10.5px;
+  font-size: clamp(10.5px, 0.8vw, 13px);
   font-weight: 600;
   letter-spacing: 0.15em;
   color: var(--lp-mint-text);
 }
 .lp-home-title {
-  margin: 10px 0 0;
-  font-size: 31px;
-  line-height: 1.32;
+  margin: clamp(12px, 1.2vw, 20px) 0 0;
+  font-size: clamp(27px, 3vw, 52px);
+  line-height: 1.28;
   font-weight: 600;
   letter-spacing: -0.02em;
   color: var(--lp-ink);
 }
 .lp-home-sub {
-  margin: 10px 0 0;
-  max-width: 440px;
-  font-size: 13px;
+  margin: clamp(12px, 1.2vw, 20px) 0 0;
+  max-width: 30em;
+  font-size: clamp(13px, 1.15vw, 18px);
   line-height: 1.75;
   color: var(--lp-muted);
 }
 .lp-home-actions {
-  margin-top: 20px;
+  margin-top: clamp(20px, 2.4vw, 36px);
   display: flex;
-  gap: 10px;
+  gap: 12px;
   align-items: center;
 }
 .lp-home-actions .lp-btn {
-  height: 36px;
-  padding: 0 18px;
-  font-size: 13px;
+  height: clamp(38px, 2.6vw, 50px);
+  padding: 0 clamp(20px, 1.6vw, 28px);
+  font-size: clamp(13px, 0.9vw, 15.5px);
 }
 
-/* 右侧示意：仅表达「视频 → 逐条核验」，不承载真实数据 */
+/* 右侧示意：仅表达「视频 → 逐条核验」，不承载真实数据。
+   宽度按容器 42% 等比例缩放（340~720px 夹取），框体 16:9 自适应高 */
 .lp-home-art {
   position: relative;
-  flex: 0 0 344px;
+  flex: 0 1 clamp(340px, 42%, 720px);
   padding: 6px 10px 10px 0;
 }
 .lp-home-frame {
@@ -1683,16 +1687,20 @@ a {
   border-radius: 2px;
   background: var(--lp-mint);
 }
+/* 浮卡收在视频框内部左下：像播放器里的核验清单，而不是飘在版面上的便签。
+   宽度随框体等比例缩放 */
 .lp-home-checks {
   position: absolute;
-  top: -6px;
-  right: 0;
-  width: 146px;
+  left: 5%;
+  bottom: 12%;
+  width: 42%;
+  min-width: 126px;
+  max-width: 210px;
   padding: 9px 11px 11px;
   border-radius: 10px;
   border: 1px solid var(--lp-border);
   background: var(--lp-surface);
-  box-shadow: 0 6px 18px rgba(8, 26, 38, 0.1);
+  box-shadow: 0 6px 18px rgba(8, 26, 38, 0.18);
 }
 .lp-home-checks-head {
   font-size: 10.5px;
@@ -1730,6 +1738,7 @@ a {
 /* ---------- 继续核验 ---------- */
 .lp-home-section {
   flex: 0 0 auto;
+  margin-bottom: auto;
 }
 .lp-home-section-head {
   display: flex;
@@ -1740,7 +1749,7 @@ a {
 }
 .lp-home-section-head h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: clamp(15px, 1.25vw, 19px);
   font-weight: 600;
   color: var(--lp-ink);
 }
@@ -1792,7 +1801,7 @@ a {
 }
 .lp-home-thumb {
   position: relative;
-  flex: 0 0 132px;
+  flex: 0 0 clamp(132px, 11vw, 190px);
   aspect-ratio: 16 / 9;
   border-radius: 8px;
   background: #0c2734;
@@ -1816,7 +1825,7 @@ a {
   min-width: 0;
 }
 .lp-home-project-name {
-  font-size: 14px;
+  font-size: clamp(14px, 1vw, 16px);
   font-weight: 600;
   color: var(--lp-ink);
   overflow: hidden;
@@ -1828,7 +1837,7 @@ a {
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 11.5px;
+  font-size: clamp(11.5px, 0.8vw, 13px);
   color: var(--lp-muted);
 }
 .lp-home-project-meta .dot {
