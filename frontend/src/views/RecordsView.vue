@@ -4,6 +4,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchCases, fetchDatasets, fetchMaterials, generateReviewReport } from '@/api'
 import { describeError } from '@/api/client'
+import LpSkeletonList from '@/components/LpSkeletonList.vue'
+import LpState from '@/components/LpState.vue'
 import type {
   AnswerStatus,
   CaseListItem,
@@ -28,7 +30,8 @@ import {
 const router = useRouter()
 
 const reviewText = (value: string) => REVIEW_STATUS_LABEL[value as ReviewStatus]
-const answerText = (value: string) => ANSWER_STATUS_LABEL[value as AnswerStatus]
+/** answerStatus 为 null = 尚未核验（V8 起），不能显示成「未找到回答」 */
+const answerText = (value: AnswerStatus | null) => (value ? ANSWER_STATUS_LABEL[value] : '尚未核验')
 const evidenceText = (value: string) => EVIDENCE_TYPE_LABEL[value as EvidenceType]
 const sufficiencyText = (value: string) => EVIDENCE_SUFFICIENCY_LABEL[value as EvidenceSufficiency]
 const cases = ref<CaseListItem[]>([])
@@ -101,7 +104,14 @@ async function onMaterialScopeChange(value: string | null) {
 }
 
 function openCase(id: string) {
-  void router.push({ path: '/', query: { case: id } })
+  // 工作台已迁到 /workbench；用 name 跳转，不再硬编码根路径
+  void router.push({ name: 'workbench', query: { case: id } })
+}
+
+/** 搜索/筛选无命中时给「清除搜索与筛选」入口，不能和「还没有用例」混为一谈 */
+function clearFilters() {
+  keyword.value = ''
+  reviewFilter.value = 'all'
 }
 
 /* ---------- AI 复盘报告 ---------- */
@@ -153,7 +163,7 @@ onMounted(load)
   <div class="lp-page">
     <header class="lp-page-head">
       <div>
-        <div class="lp-crumb">工作台 <span class="sep">/</span> 核验记录</div>
+        <div class="lp-crumb">首页 <span class="sep">/</span> 核验记录</div>
         <h1 class="lp-page-title">核验记录</h1>
         <p class="lp-page-sub">
           全部用例的四字段状态。任一取值组合都不等于「内容为真」，需人工逐条改判。
@@ -236,8 +246,47 @@ onMounted(load)
       </div>
 
       <div class="lp-page-body">
-        <div v-if="error" class="lp-note warn" style="margin: 12px">{{ error }}</div>
-        <el-table :data="filtered" size="small" style="width: 100%" empty-text="没有匹配的用例">
+        <!-- 请求失败：没有任何数据时用错误态整块替换表格（失败 ≠ 没有用例）；已有数据时保留旧表 + 顶部警示 -->
+        <LpState
+          v-if="error && cases.length === 0"
+          variant="error"
+          title="核验记录加载失败"
+          :description="error"
+        >
+          <template #actions>
+            <button type="button" class="lp-btn lp-btn-primary" :disabled="loading" @click="load">
+              {{ loading ? '重试中…' : '重新加载' }}
+            </button>
+          </template>
+        </LpState>
+        <LpSkeletonList v-else-if="loading && cases.length === 0" :rows="6" />
+        <!-- 有筛选条件但没命中：给清除入口，不能和「还没有用例」混为一谈 -->
+        <LpState
+          v-else-if="cases.length > 0 && filtered.length === 0"
+          variant="search"
+          title="没有匹配的用例"
+          :description="keyword.trim() ? `没有问题、承诺或 id 包含「${keyword.trim()}」的记录，换个关键词试试。` : '当前筛选进度下没有用例。'"
+        >
+          <template #actions>
+            <button type="button" class="lp-btn" @click="clearFilters">清除搜索与筛选</button>
+          </template>
+        </LpState>
+        <LpState
+          v-else-if="cases.length === 0"
+          title="还没有核验记录"
+          description="在新建核验项目里录入产品承诺并核验后，记录会出现在这里。"
+        >
+          <template #actions>
+            <button type="button" class="lp-btn lp-btn-primary" @click="router.push({ name: 'new-task' })">
+              新建核验项目
+            </button>
+          </template>
+        </LpState>
+        <template v-else>
+          <div v-if="error" class="lp-note warn" style="margin: 12px">
+            {{ error }}
+          </div>
+          <el-table :data="filtered" size="small" style="width: 100%" empty-text="没有匹配的用例">
           <el-table-column type="index" label="#" width="48" />
           <el-table-column label="待核验问题" min-width="280">
             <template #default="{ row }">
@@ -283,6 +332,7 @@ onMounted(load)
             </template>
           </el-table-column>
         </el-table>
+        </template>
       </div>
     </section>
 

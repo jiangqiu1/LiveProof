@@ -1,7 +1,8 @@
-// 新建核验任务向导（P4–P6）端到端验证（真实 Chrome + CDP，无第三方依赖）
+// 新建核验项目向导（P4–P6）端到端验证（真实 Chrome + CDP，无第三方依赖）
 //
 // 覆盖：/tasks 列表入口 / 侧栏高亮 / 三步向导 / 素材选择与转码态提示 /
-//       字幕方式三选一 / 录入方式三选一 / 手动新增落库 / 进工作台带素材参数 / 记录页素材范围。
+//       字幕方式三选一 / 录入方式四选一（AI 候选 / 手动 / CSV / 稍后）/ 手动新增落库 /
+//       进工作台带素材参数 / 记录页素材范围。
 //
 // 用法：node scripts/verify-new-task-flow.mjs [baseUrl]
 // 前置：后端 8080 与前端 5173 均已启动，且数据库已有 ready 素材与至少 1 条事项。
@@ -236,21 +237,21 @@ async function main() {
         return {
           path: window.__lpw.pagePath(),
           nav: window.__lpw.activeNav(),
-          hasNewButton: !!window.__lpw.buttonByText('新建核验任务'),
+          hasNewButton: !!window.__lpw.buttonByText('新建核验项目'),
           text: window.__lpw.bodyText().slice(0, 200),
         };
       })()`,
     )
     report.steps.push({ step: '/tasks 列表页', ...tasksPage })
     if (!tasksPage.path.startsWith('/tasks')) report.problems.push('/tasks 路由未生效')
-    if (!tasksPage.nav.includes('核验任务')) {
-      report.problems.push(`侧栏高亮错误：期望「核验任务」，实际「${tasksPage.nav}」`)
+    if (!tasksPage.nav.includes('核验项目')) {
+      report.problems.push(`侧栏高亮错误：期望「核验项目」，实际「${tasksPage.nav}」`)
     }
-    if (!tasksPage.hasNewButton) report.problems.push('/tasks 缺少「新建核验任务」入口')
+    if (!tasksPage.hasNewButton) report.problems.push('/tasks 缺少「新建核验项目」入口')
     await shot(client, 'new-task-1-tasks-list.png')
 
     // ---- 2. 进入向导，核对三步标题 ----
-    await evaluate(client, `window.__lpw.clickButton('新建核验任务'); true`, false)
+    await evaluate(client, `window.__lpw.clickButton('新建核验项目'); true`, false)
     await sleep(1500)
     await evaluate(client, PRELUDE, false)
 
@@ -277,8 +278,8 @@ async function main() {
     if (!titles[0]?.includes('选择素材')) report.problems.push('第 1 步标题不对：' + titles[0])
     if (!titles[1]?.includes('字幕')) report.problems.push('第 2 步标题不对：' + titles[1])
     if (!titles[2]?.includes('核验事项')) report.problems.push('第 3 步标题不对：' + titles[2])
-    // new-task 是 tasks 的子页面，侧栏必须仍高亮「核验任务」
-    if (!wizardStep1.nav.includes('核验任务')) {
+    // new-task 是 tasks 的子页面，侧栏必须仍高亮「核验项目」
+    if (!wizardStep1.nav.includes('核验项目')) {
       report.problems.push(`new-task 侧栏高亮错误：实际「${wizardStep1.nav}」`)
     }
     // 「下一步」的禁用逻辑：有就绪素材时前端会自动选中第一条，此时按钮应可用；
@@ -341,13 +342,17 @@ async function main() {
     )
     report.steps.push({ step: '跳过字幕进入第 3 步', ...step3 })
     if (step3.steps[2]?.active !== true) report.problems.push('未进入第 3 步')
-    if (step3.cards.length !== 3) {
-      report.problems.push(`第 3 步应有 3 种录入方式，实际 ${step3.cards.length}`)
+    if (step3.cards.length !== 4) {
+      report.problems.push(`第 3 步应有 4 种录入方式（AI 候选 / 手动 / CSV / 稍后），实际 ${step3.cards.length}`)
     }
     // 产品红线文案必须存在
     const step3Text = await evaluate(client, `window.__lpw.bodyText()`, false)
     if (!step3Text.includes('不是 AI 自动生成')) {
       report.problems.push('第 3 步缺少「不是 AI 自动生成」的红线说明')
+    }
+    // AI 候选入口同样不能暗示「AI 已经下了结论」
+    if (!step3Text.includes('不替你下结论') || !step3Text.includes('尚未核验')) {
+      report.problems.push('第 3 步缺少「AI 候选入库仍是尚未核验」的红线说明')
     }
     await shot(client, 'new-task-4-step3.png')
 
@@ -425,8 +430,9 @@ async function main() {
       // 四字段必须是服务端固定占位值
       if (created.source !== 'manual') report.problems.push('新增事项 source 应为 manual')
       if (created.reviewStatus !== 'unreviewed') report.problems.push('新增事项 reviewStatus 应为 unreviewed')
-      if (created.answerStatus !== 'not_found') {
-        report.problems.push('新增事项 answerStatus 应为占位值 not_found')
+      // V8 起 answer_status 落 NULL 才算「尚未核验」，not_found 是「核验过、确实没找到」
+      if (created.answerStatus !== null) {
+        report.problems.push(`新增事项 answerStatus 应为 null（尚未核验），实际 ${created.answerStatus}`)
       }
       if (created.evidenceType !== 'unknown') report.problems.push('新增事项 evidenceType 应为 unknown')
       if (created.evidenceSufficiency !== 'not_checked') {

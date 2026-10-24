@@ -1,5 +1,6 @@
 package com.liveproof.ai;
 
+import com.liveproof.dto.SubtitleCue;
 import com.liveproof.entity.CaseEntity;
 import com.liveproof.service.EvidenceContextService;
 
@@ -67,6 +68,49 @@ public final class AiPromptBuilder {
               ],
               "suggestedTimePoints": [0],
               "unresolvedQuestions": ["仍需人工确认的问题"]
+            }
+            """;
+
+    /**
+     * 从字幕提取候选核验事项。
+     *
+     * <p>与 {@link #REVIEW_SYSTEM} 的分工：这里只负责「找出视频里值得核验的承诺」，
+     * <b>不做任何核验判断</b>。所以提示词里反复禁止输出结论、禁止补全常识、禁止凑数——
+     * 候选是给人挑的，宁可少一条，也不要塞进一条视频里根本没说的话。
+     */
+    public static final String CANDIDATE_SYSTEM = """
+            你是产品演示复盘的选题助手。你会收到一段演示视频的字幕，任务是从中提取「值得人工核验的产品承诺」。
+
+            只做选题，不做核验：
+            1. 你只负责找出视频里说过哪些可以被证明或反驳的能力、数量、效果、流程，把它写成待核验事项。
+            2. 你<b>不能</b>判断这些承诺是否被实际操作证明。不要写「已验证」「支持良好」「存在风险」这类结论。
+            3. claim 必须是「视频声称了什么」的客观转述，不是「事实是什么」。
+
+            提取原则：
+            4. 只提取字幕里<b>明确出现</b>的承诺。字幕没提到的，一律不提取；不得用常识、行业惯例或产品常见功能补全。
+            5. 同一件事只说一次。多条字幕讲同一件事时合并成一条，时间区间覆盖最长的那段，不要拆成多条。
+            6. 纯寒暄、纯操作口令（「点这里」「好的」「稍等一下」）、没有可核验含义的界面描述，不要提取。
+            7. 承诺越具体越值得提取（带数量、条件、范围的优先）；「很好用」「很方便」这类无法核对的形容词不要单独成条。
+            8. startSec / endSec 必须取自给定字幕的时间，不得编造；区间应尽量贴住原话，不要拉成整段视频。
+            9. 如果整段字幕里没有可核验的产品承诺，candidates 返回空数组——这是合法结果，绝对不要为了凑数硬造。
+
+            输出要求：
+            - 只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释性前后缀。
+            - candidates 最多 8 条，按 startSec 升序。
+            - quote 填该区间对应的字幕原文（可截取关键句），必须来自给定字幕，不得改写或拼接。
+            - question 写成一句可直接核验的中文提问，claim 写成一句陈述，两者都不要出现「据说是」「可能」这类模糊词。
+
+            JSON schema：
+            {
+              "candidates": [
+                {
+                  "question": "待核验的问题",
+                  "claim": "视频里的原话要点",
+                  "startSec": 0,
+                  "endSec": 0,
+                  "quote": "该区间的字幕原文"
+                }
+              ]
             }
             """;
 
@@ -139,6 +183,50 @@ public final class AiPromptBuilder {
         sb.append("并给出可回看的时间点。严格按 system 中的 JSON schema 输出：");
         sb.append("每条 evidenceItems 都要有非空的 supports 与 cannotProve，limitations 也要非空。\n");
         return sb.toString();
+    }
+
+    /**
+     * 候选提取的 user 消息：素材元信息 + 整段字幕。
+     *
+     * <p>与核验不同，这里<b>不做</b>时间窗裁剪——候选要覆盖整段演示，
+     * 只按字符预算做均匀抽样，并如实告知模型「这是抽样后的字幕」，
+     * 避免它把「抽样里没看到」说成「视频里没有」。
+     */
+    public static String candidateUserPrompt(String materialName, String materialId, String sourceLabel,
+                                             Double durationSec, List<SubtitleCue> cues, boolean truncated) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("## 演示素材\n");
+        sb.append("- 素材名称：").append(nullToDash(materialName)).append('\n');
+        sb.append("- 素材 id：").append(nullToDash(materialId)).append('\n');
+        sb.append("- 视频时长：")
+                .append(durationSec == null ? "未知" : fmt(durationSec) + "（" + trimNum(durationSec) + " 秒）")
+                .append('\n');
+        sb.append("- 字幕来源：").append(sourceLabel).append("\n\n");
+
+        sb.append("## 字幕（").append(cues.size()).append(" 条，按时间升序）\n");
+        if (truncated) {
+            sb.append("（字幕总长超过单次提交上限，下面是均匀抽样后的结果；")
+                    .append("没出现在这里的内容只代表本次未提交，不代表视频里没说）\n");
+        }
+        sb.append(cues.stream()
+                .map(cue -> "[cue %d] %s-%s  %s".formatted(
+                        cue.index(), fmt(cue.startSec()), fmt(cue.endSec()),
+                        cue.text().replace("\n", " ")))
+                .collect(Collectors.joining("\n")));
+        sb.append("\n\n");
+
+        sb.append("## 任务\n");
+        sb.append("从上面的字幕里提取值得人工核验的产品承诺，严格按 system 中的 JSON schema 输出。\n");
+        sb.append("只提取字幕里明确说过的东西；没有任何值得核验的承诺时，返回 {\"candidates\": []}，不要硬造。\n");
+        return sb.toString();
+    }
+
+    /** 秒数保留一位小数，避免把 106.47 写成 106.47000000000001。 */
+    private static String trimNum(double sec) {
+        return java.math.BigDecimal.valueOf(sec)
+                .setScale(1, java.math.RoundingMode.HALF_UP)
+                .stripTrailingZeros()
+                .toPlainString();
     }
 
     private static String nullToDash(String value) {

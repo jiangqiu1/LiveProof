@@ -2,6 +2,7 @@ package com.liveproof;
 
 import com.liveproof.controller.CaseController;
 import com.liveproof.exception.GlobalExceptionHandler;
+import com.liveproof.service.CaseCandidateService;
 import com.liveproof.service.CaseImportService;
 import com.liveproof.service.CaseService;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,7 +36,8 @@ class DatabaseErrorTest {
     void setUp() {
         caseService = mock(CaseService.class);
         mockMvc = MockMvcBuilders
-                .standaloneSetup(new CaseController(caseService, mock(CaseImportService.class)))
+                .standaloneSetup(new CaseController(caseService, mock(CaseImportService.class),
+                        mock(CaseCandidateService.class)))
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .build();
     }

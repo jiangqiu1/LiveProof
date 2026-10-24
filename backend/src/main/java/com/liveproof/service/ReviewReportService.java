@@ -276,6 +276,7 @@ public class ReviewReportService {
         groupByAnswer(md, cases, AnswerStatus.ANSWERED, "已回答");
         groupByAnswer(md, cases, AnswerStatus.PARTIALLY_ANSWERED, "部分回答");
         groupByAnswer(md, cases, AnswerStatus.NOT_FOUND, "未找到回答");
+        groupByUncheckedAnswer(md, cases);
         md.append("\n> 说明：以上归类只描述「视频里怎么说的、证据长什么样」，")
                 .append("不代表内容为真，也不代表功能已实现。\n\n");
 
@@ -421,8 +422,26 @@ public class ReviewReportService {
     }
 
     private void groupByAnswer(StringBuilder md, List<CaseEntity> cases, AnswerStatus status, String title) {
-        List<CaseEntity> group = cases.stream().filter(c -> answerOf(c) == status).toList();
+        // 按真实取值比较：answerStatus 为 NULL 的行不能落进 not_found 组，
+        // 那会把「还没核验」统计成「已经判定为没找到回答」（V8 起 NULL = 未核验）
+        List<CaseEntity> group = cases.stream().filter(c -> c.getAnswerStatus() == status).toList();
         md.append("**").append(title).append("（").append(group.size()).append("）**\n\n");
+        if (group.isEmpty()) {
+            md.append("- 无\n\n");
+            return;
+        }
+        group.forEach(c -> md.append("- `").append(c.getId()).append("` ")
+                .append(nullToDash(c.getQuestion())).append('\n'));
+        md.append('\n');
+    }
+
+    /**
+     * 「尚未核验」单独成组：answerStatus 为 NULL 的行还没被判定过，
+     * 既不能算 not_found，也不该从归类里消失。
+     */
+    private void groupByUncheckedAnswer(StringBuilder md, List<CaseEntity> cases) {
+        List<CaseEntity> group = cases.stream().filter(c -> c.getAnswerStatus() == null).toList();
+        md.append("**尚未核验（").append(group.size()).append("）**\n\n");
         if (group.isEmpty()) {
             md.append("- 无\n\n");
             return;
@@ -434,10 +453,6 @@ public class ReviewReportService {
 
     private static EvidenceType typeOf(CaseEntity c) {
         return c.getEvidenceType() == null ? EvidenceType.UNKNOWN : c.getEvidenceType();
-    }
-
-    private static AnswerStatus answerOf(CaseEntity c) {
-        return c.getAnswerStatus() == null ? AnswerStatus.NOT_FOUND : c.getAnswerStatus();
     }
 
     private List<SubtitleCue> cuesOf(String video, Map<String, List<SubtitleCue>> cache) {
@@ -520,7 +535,8 @@ public class ReviewReportService {
 
     private static String label(AnswerStatus status) {
         if (status == null) {
-            return "未知";
+            // NULL 不是「未知」也不是「未找到回答」：它只表示这条还没有被判定过（V8 起）
+            return "尚未核验";
         }
         return switch (status) {
             case ANSWERED -> "已回答";

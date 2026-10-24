@@ -43,8 +43,8 @@ LiveProof 是面向 POLYV（保利威）黑客松的参赛项目。普通 AI 视
 | 后端 | Java 21 · Spring Boot 3.5.8 · MyBatis-Plus 3.5.9 · MySQL 8.4，端口 `8080` |
 | 前端 | Vue 3.5 · TypeScript 5.6 · Vite 6 · Element Plus 2.9 · Pinia 2 · Vue Router 4 · Axios，端口 `5173` |
 | 接口契约 | `api/openapi.yaml`（OpenAPI 3.0.3，单一事实源，25 path / 34 operation / 45 schema） |
-| 数据库迁移 | `backend/src/main/resources/db/migration/V1~V7`（V7 建 `materials` 表） |
-| AI | 可选。OpenAI 兼容端点（DeepSeek 官方或阿里云百炼），仅用于生成核验建议与复盘报告 |
+| 数据库迁移 | `backend/src/main/resources/db/migration/V1~V8`（V7 建 `materials` 表，V8 放宽 `answer_status` 约束） |
+| AI | 可选。OpenAI 兼容端点（DeepSeek 官方或阿里云百炼），用于候选事项生成、核验建议与复盘报告 |
 
 ---
 
@@ -63,17 +63,18 @@ LiveProof 是面向 POLYV（保利威）黑客松的参赛项目。普通 AI 视
 │       ├── dto/                  请求与响应体
 │       ├── entity/ / mapper/     实体与 MyBatis-Plus Mapper
 │       ├── enums/ / exception/   枚举与统一错误码
-│       ├── polyv/                保利威签名与点播客户端
+│       ├── polyv/                保利威签名与点播客户端（上传 / 截图 / 智能字幕）
 │       └── service/              业务逻辑
 │   └── src/main/resources/
 │       ├── application.yml
-│       └── db/migration/         V1~V7 迁移脚本
+│       └── db/migration/         V1~V8 迁移脚本
 ├── frontend/
 │   └── src/
 │       ├── api/                  接口封装（上传走 XHR 以拿到进度）
-│       ├── components/           VideoPlayer 等
+│       ├── components/           VideoPlayer / LpState（空·错·搜三态）/ LpSkeletonList（骨架屏）等
 │       ├── stores/               Pinia（workbench）
-│       ├── views/                Workbench / Media / Records / Todos / Tasks / NewTask
+│       ├── views/                Home（产品首页）/ Workbench / Media / Records / Todos / Tasks / NewTask
+│       ├── styles/               设计令牌（颜色 / 圆角 / 动效三档）与全局样式
 │       └── types/                API 类型定义
 ├── scripts/                      构建、数据库与验收脚本
 ├── .env.example                  环境变量模板（复制为 .env.local 后填写）
@@ -124,7 +125,7 @@ cp .env.example .env.local   # 填入真实值；.env.local 已被 .gitignore �
 ### 3. 初始化数据库
 
 ```bash
-scripts/db-migrate.sh          # 执行 V1~V7 迁移
+scripts/db-migrate.sh          # 执行 V1~V8 迁移
 scripts/db-verify-backup.sh    # 可选：校验备份可用性
 ```
 
@@ -145,12 +146,13 @@ cd frontend && npm install && npm run dev
 
 ```bash
 cd frontend && npm run typecheck          # vue-tsc --noEmit
-scripts/verify-new-task-flow.mjs          # 核验任务创建向导 E2E
+scripts/verify-frontend.mjs               # 核验工作台全流程 E2E
+scripts/verify-new-task-flow.mjs          # 三步向导（选素材→选题→进入工作台）E2E
 scripts/verify-media-playback.mjs         # 媒体播放与 Range 请求
 node scripts/reset-demo-data.mjs          # 重置演示数据（默认 dry-run，加 --apply 才执行）
 ```
 
-后端集成测试共 **211 条**（`Tests run: 211, Failures: 0, Errors: 0, Skipped: 3`，3 条 skip 为依赖 FFmpeg 的用例）：
+后端集成测试共 **230 条**（`Tests run: 230, Failures: 0, Errors: 0, Skipped: 3`，3 条 skip 为依赖 FFmpeg 的用例）：
 
 ```bash
 scripts/mvn.sh -f backend/pom.xml test
@@ -167,9 +169,10 @@ scripts/mvn.sh -f backend/pom.xml test
 | 核验事项 | `GET /api/cases`、`POST /api/cases`、`GET /api/cases/{id}`、`PATCH /api/cases/{id}`、`DELETE /api/cases/{id}` |
 | 待办 | `GET /api/todos`、`POST /api/todos`、`PATCH /api/todos/{id}`、`DELETE /api/todos/{id}` |
 | 素材 | `GET /api/materials`、`POST /api/materials`、`GET /api/materials/capabilities`、`POST /api/materials/{id}/play`、`DELETE /api/materials/{id}` |
+| 素材导入 | `GET /api/materials/csv/template`、`POST /api/materials/csv/preview`、`POST /api/materials/csv/import` |
 | 字幕 | `GET /api/subtitles/...`、`POST /api/materials/{id}/subtitle`、`DELETE /api/materials/{id}/subtitle` |
 | 智能字幕 | `POST /api/smart-subtitles/tasks`、`GET /api/smart-subtitles/tasks/{taskId}`、`POST /api/smart-subtitles/tasks/adopt` |
-| AI | `POST /api/ai/suggestions`、`POST /api/ai/review-summary` |
+| AI | `POST /api/ai/suggestions`、`POST /api/ai/review-summary`、`POST /api/ai/case-candidates`（从字幕选题，只读） |
 | 报告 | `GET /api/reports/...` |
 | 媒体 | `GET /media/{name}`（手写 Range 支持，返回 200 / 206 / 416） |
 

@@ -7,7 +7,7 @@ info:
 
     ## 四类核验字段（相互独立，不得互相推导）
     - '`reviewStatus`：这条人工看过没有（unreviewed / in_review / reviewed）'
-    - '`answerStatus`：视频里有没有这样说（answered / partially_answered / not_found）'
+    - '`answerStatus`：视频里有没有这样说（answered / partially_answered / not_found；`null` = 尚未核验）'
     - '`evidenceType`：证据是什么形态（verbal_claim / specification_display / operational_evidence / unknown）'
     - '`evidenceSufficiency`：证据够不够（not_checked / insufficient / sufficient）'
 
@@ -373,8 +373,8 @@ paths:
 
         **新行的四个核验字段由服务端固定，不接受客户端指定**：
         - `reviewStatus = unreviewed`
-        - `answerStatus = not_found` —— 这只是**数据库占位值**，
-          产品语义是「尚未核验」，**不得**展示为「视频没有这样说」
+        - `answerStatus = null` —— 表示**尚未核验**（V8 起）。
+          `not_found` 只表示「核验过、视频里确实没有找到回答」，两者不可混用
         - `evidenceType = unknown`
         - `evidenceSufficiency = not_checked`
         - `source = manual`，`id` / `createdAt` 亦由服务端生成
@@ -563,6 +563,61 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
+
+  /api/cases/from-candidates:
+    post:
+      tags: [cases]
+      summary: 把 AI 候选事项确认入库
+      description: |
+        一次提交多条，**要么全写入、要么整批拒绝**：任何一条不合法就返回
+        422 `CASE_CANDIDATE_INVALID`，`message` 里逐条列出问题（第 N 条：原因），
+        数据库不留半成品。
+
+        与 `POST /api/cases` 的区别只有两点：
+        - `source` 固定记 `ai`，复盘报告据此区分「AI 起草」与「人工录入」
+        - 支持一次多条、原子写入
+
+        核验字段默认值与手动新增完全一致，**客户端无法通过本接口写入任何核验结论**：
+        `reviewStatus=unreviewed`、`answerStatus=null`（尚未核验，**不是** `not_found`）、
+        `evidenceType=unknown`、`evidenceSufficiency=not_checked`。
+      operationId: createCasesFromCandidates
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CaseCandidateBatchRequest'
+      responses:
+        '201':
+          description: 全部写入成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseCandidateBatchResult'
+        '400':
+          description: '`items` 为空、超过 20 条，或 `materialId` 缺失（`INVALID_PARAMETER`）'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: 素材不存在（`MATERIAL_NOT_FOUND`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: 素材尚未就绪（`MATERIAL_NOT_READY`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: 有条目未通过校验，整批未写入（`CASE_CANDIDATE_INVALID`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/cases/{id}:
     get:
@@ -1329,6 +1384,102 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/ai/case-candidates:
+    post:
+      tags: [ai]
+      summary: 从素材字幕生成候选核验事项
+      description: |
+        读取该素材**真实可用**的字幕，让模型提取「值得人工核验的产品承诺」，返回候选清单。
+
+        本接口**不写库**：候选只是预览，用户勾选、编辑后走
+        `POST /api/cases/from-candidates` 才落库。候选里也**不含任何核验字段**——
+        AI 只负责想问题，不产出结论。
+
+        三种「没有结果」必须区分开，不能混成一个：
+        - 未配置密钥 → 503 `AI_NOT_CONFIGURED`
+        - 素材没有可用字幕 → 409 `SUBTITLE_UNAVAILABLE`；指定 `cloud` 但没有就绪任务时是
+          409 `SMART_SUBTITLE_NOT_READY`。**不会**拿空字幕去问模型，也不会把
+          「没有字幕」说成「视频没有承诺」
+        - 字幕有、模型也答了，但确实没有可核验的承诺 → 200 + `candidates: []`
+
+        规范化在服务端完成，不依赖模型自称：
+        - 时间区间必须与真实字幕重叠，对不上的候选被丢弃并记入 `notes`
+        - `quote` 与字幕不重合（模型改写或编造）时替换为该区间真实字幕，并记入 `notes`
+        - 批内与库内（同一素材）按归一后的问句判重，重复项 `duplicate=true`，
+          前端默认不勾选
+      operationId: generateCaseCandidates
+      parameters:
+        - name: materialId
+          in: query
+          required: true
+          description: 素材 id（内置示例素材与保利威云端素材都接受）
+          schema:
+            type: string
+        - name: subtitleSource
+          in: query
+          required: false
+          description: 字幕来源，缺省 `auto`；取值非法 400 `INVALID_PARAMETER`
+          schema:
+            $ref: '#/components/schemas/CandidateSubtitleSource'
+      responses:
+        '200':
+          description: 候选清单（可能为空数组，表示确实没有可核验的承诺）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AiCandidateResponse'
+        '400':
+          description: '`materialId` 缺失或 `subtitleSource` 非法（`INVALID_PARAMETER`）'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: 素材不存在（`MATERIAL_NOT_FOUND`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |
+            `SUBTITLE_UNAVAILABLE`（该素材没有可用字幕）、
+            `SMART_SUBTITLE_NOT_READY`（要求云端字幕但没有就绪任务）
+            或 `MATERIAL_NOT_READY`（素材还没就绪）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: 模型返回无法安全解析（`AI_INVALID_RESPONSE`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: 模型服务限流（`AI_RATE_LIMITED`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: 上游失败或鉴权失败（`AI_UPSTREAM_ERROR` / `AI_AUTH_FAILED`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: 运行时未配置密钥（`AI_NOT_CONFIGURED`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          description: 模型调用超时（`AI_TIMEOUT`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/reports/review:
     post:
       tags: [reports]
@@ -1520,11 +1671,28 @@ components:
         srtFileName:
           type: string
           nullable: true
-          description: 已上传的本地 SRT 文件名；null 表示未上传。与云端智能字幕无关
+          description: >-
+            用户为该素材上传的本地 SRT 文件名；null 表示未上传。与云端智能字幕无关。
+            注意：null **不代表没有字幕**，判断请用 `subtitleAvailable`
+        subtitleAvailable:
+          type: boolean
+          description: >-
+            该素材当前能否解析到字幕（后端按「登记的 srtFileName → 静态白名单映射 →
+            `{文件名}.srt`」三级顺序判断，只看文件是否存在）。
+            内置示例素材的 `srtFileName` 为 null，但通过白名单映射到配套 SRT，
+            此字段为 true。首页据此显示「本地字幕可用」，不要用 `srtFileName != null` 代替
         createdAt:
           type: string
           format: date-time
           nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            素材行最后变更时间（转码状态刷新、字幕登记都会更新）。
+            用于首页「继续你的核验工作」排序；**不代表用户编辑过内容**，
+            展示时必须与「创建于」区分
 
     MaterialCapabilities:
       type: object
@@ -1814,7 +1982,13 @@ components:
         reviewStatus:
           $ref: '#/components/schemas/ReviewStatus'
         answerStatus:
-          $ref: '#/components/schemas/AnswerStatus'
+          allOf:
+            - $ref: '#/components/schemas/AnswerStatus'
+          nullable: true
+          description: >-
+            `null` 表示**尚未核验**（V8 起新建/导入事项的落库值）。
+            与 `not_found`（核验过、视频里确实没找到回答）是两件不同的事，
+            界面与报告都不得把 `null` 展示成「未找到回答」
         evidenceType:
           $ref: '#/components/schemas/EvidenceType'
         evidenceSufficiency:
@@ -1981,12 +2155,20 @@ components:
 
     SubtitleResponse:
       type: object
-      required: [video, subtitleFile, cueCount, cues]
+      required: [video, subtitleFile, source, cueCount, cues]
       properties:
         video:
           type: string
         subtitleFile:
           type: string
+        source:
+          type: string
+          description: |
+            这份字幕的来源。`uploaded` = 素材页显式上传并登记到 materials.srt_file_name；
+            `mapping` = 内置白名单映射（内置示例素材配套的 SRT）；
+            `legacy` = 素材目录下 `{标识}.srt` 的兼容回退。
+            「有字幕」只代表拿到了 cue，不代表字幕内容正确；「没上传字幕」也不代表没有可用字幕。
+          enum: [uploaded, mapping, legacy]
         language:
           type: string
           example: zh
@@ -2423,6 +2605,171 @@ components:
         generatedAt:
           type: string
           format: date-time
+
+    CandidateSubtitleSource:
+      type: string
+      enum: [auto, local, cloud]
+      description: |
+        候选事项提取用哪份字幕：
+
+        - `auto`（缺省）：先本地 SRT，没有再用已就绪的保利威智能字幕；
+          两者都没有才返回 409 `SUBTITLE_UNAVAILABLE`
+        - `local`：只用本地 SRT；没有时 409 `SUBTITLE_UNAVAILABLE`，提示上传 SRT
+        - `cloud`：只用云端字幕；没有就绪任务时 409 `SMART_SUBTITLE_NOT_READY`
+
+        之所以允许 `auto`：用户通常不知道某个素材到底准备了哪一份字幕，
+        强制他先去看素材页只会多一步无效操作。
+      example: auto
+
+    AiCaseCandidate:
+      type: object
+      description: |
+        一条**候选**核验事项。刻意不含 `reviewStatus` / `answerStatus` /
+        `evidenceType` / `evidenceSufficiency`——AI 只负责提出值得核验的问题，
+        是否被证明由人工回到工作台判断。
+      required: [id, question, claim, duplicate]
+      properties:
+        id:
+          type: string
+          description: 本批次内的稳定标识（`cand-1` 起），仅用于前端定位，落库时会重新生成 id
+          example: cand-1
+        question:
+          type: string
+          description: 待核验的问题（可直接核验的一句问句）
+          example: 一次导入能否写入 3 条候选人记录？
+        claim:
+          type: string
+          description: 视频里的原话要点（客观转述「说了什么」，不是「事实是什么」）
+          example: 演示中导入了 3 条候选人记录
+        startSec:
+          type: number
+          format: double
+          nullable: true
+          description: 建议区间起点（秒），来自真实字幕
+        endSec:
+          type: number
+          format: double
+          nullable: true
+          description: 建议区间终点（秒）
+        quote:
+          type: string
+          nullable: true
+          description: |
+            该区间的字幕原文，供人工回看核对。
+            模型给出的引用与字幕不重合时，服务端会替换为该区间的真实字幕。
+        cueIndexes:
+          type: array
+          description: 覆盖到的字幕序号（升序）
+          items:
+            type: integer
+        duplicate:
+          type: boolean
+          description: 疑似重复（库内同素材已有同问题，或本批前面已出现）。前端默认不勾选
+        duplicateOf:
+          type: string
+          nullable: true
+          description: 与库内已有事项重复时的 case id
+        duplicateOfIndex:
+          type: integer
+          nullable: true
+          description: 与本批第几条重复（1 起）
+
+    AiCandidateResponse:
+      type: object
+      description: 候选生成结果。**不写库**，需用户确认后另行走 `POST /api/cases/from-candidates`
+      required: [materialId, subtitleSource, cuesUsed, candidates, duplicateCount, notes]
+      properties:
+        materialId:
+          type: string
+        subtitleSource:
+          type: string
+          enum: [local, cloud]
+          description: 本次实际使用的字幕来源
+        subtitleFile:
+          type: string
+          nullable: true
+          description: 本地字幕文件名；云端来源恒为 null
+        totalCues:
+          type: integer
+          description: 该字幕的总条数
+        cuesUsed:
+          type: integer
+          description: 实际提交给模型的条数（字幕过长时为均匀抽样后的条数）
+        truncated:
+          type: boolean
+          description: 是否因字符上限做过均匀抽样
+        model:
+          type: string
+        elapsedMs:
+          type: integer
+          format: int64
+        candidates:
+          type: array
+          description: 按 startSec 升序；为空数组表示「字幕里确实没有可核验的承诺」
+          items:
+            $ref: '#/components/schemas/AiCaseCandidate'
+        duplicateCount:
+          type: integer
+          description: 其中疑似重复的条数
+        notes:
+          type: array
+          description: |
+            规范化说明：被丢弃的候选（时间对不上字幕）、被替换的引用原文、
+            条数截断、去重条数。非空说明模型输出被服务端改动过。
+          items:
+            type: string
+
+    CaseCandidateBatchRequest:
+      type: object
+      required: [materialId, items]
+      properties:
+        materialId:
+          type: string
+        items:
+          type: array
+          minItems: 1
+          maxItems: 20
+          description: 用户勾选并可能编辑过的候选；**不接受**任何核验结论字段
+          items:
+            type: object
+            required: [question, claim]
+            properties:
+              question:
+                type: string
+                maxLength: 500
+              claim:
+                type: string
+                maxLength: 500
+              startSec:
+                type: number
+                format: double
+                nullable: true
+              endSec:
+                type: number
+                format: double
+                nullable: true
+
+    CaseCandidateBatchResult:
+      type: object
+      description: 全部写入成功（部分失败不会返回本结构，而是 422 整批拒绝）
+      required: [materialId, requested, createdCount, created, source]
+      properties:
+        materialId:
+          type: string
+        requested:
+          type: integer
+          description: 提交条数
+        createdCount:
+          type: integer
+          description: 实际写入条数，与 requested 相等
+        created:
+          type: array
+          items:
+            $ref: '#/components/schemas/CaseDetail'
+        source:
+          type: string
+          enum: [ai]
+          description: 来源标记固定为 ai
 
     ReportStats:
       type: object

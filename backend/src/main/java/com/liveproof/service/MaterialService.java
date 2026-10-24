@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.liveproof.config.MaterialProperties;
+import com.liveproof.config.MediaProperties;
 import com.liveproof.config.PolyvProperties;
 import com.liveproof.dto.MaterialDto;
 import com.liveproof.dto.MaterialPlayDto;
@@ -30,6 +31,7 @@ import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -58,17 +60,20 @@ public class MaterialService {
     private final MaterialProperties materialProperties;
     private final PolyvProperties polyvProperties;
     private final PolyvVodClient vodClient;
+    private final MediaProperties mediaProperties;
 
     public MaterialService(MaterialMapper materialMapper,
                            CaseMapper caseMapper,
                            MaterialProperties materialProperties,
                            PolyvProperties polyvProperties,
-                           PolyvVodClient vodClient) {
+                           PolyvVodClient vodClient,
+                           MediaProperties mediaProperties) {
         this.materialMapper = materialMapper;
         this.caseMapper = caseMapper;
         this.materialProperties = materialProperties;
         this.polyvProperties = polyvProperties;
         this.vodClient = vodClient;
+        this.mediaProperties = mediaProperties;
     }
 
     /** 素材列表：内置在前，其余按创建时间倒序；顺手刷新仍在转码的行。 */
@@ -77,7 +82,7 @@ public class MaterialService {
         wrapper.orderByDesc(MaterialEntity::getBuiltin).orderByDesc(MaterialEntity::getCreatedAt);
         return materialMapper.selectList(wrapper).stream()
                 .map(this::refreshIfTranscoding)
-                .map(MaterialService::toDto)
+                .map(this::toDto)
                 .toList();
     }
 
@@ -90,7 +95,7 @@ public class MaterialService {
     public List<MaterialDto> listWithoutRefresh() {
         LambdaQueryWrapper<MaterialEntity> wrapper = Wrappers.lambdaQuery(MaterialEntity.class);
         wrapper.orderByDesc(MaterialEntity::getBuiltin).orderByDesc(MaterialEntity::getCreatedAt);
-        return materialMapper.selectList(wrapper).stream().map(MaterialService::toDto).toList();
+        return materialMapper.selectList(wrapper).stream().map(this::toDto).toList();
     }
 
     public MaterialDto get(String id) {
@@ -400,7 +405,7 @@ public class MaterialService {
         }
     }
 
-    static MaterialDto toDto(MaterialEntity entity) {
+    MaterialDto toDto(MaterialEntity entity) {
         boolean published = entity.getPolyvStatus() != null
                 && (entity.getPolyvStatus() == 60 || entity.getPolyvStatus() == 61);
         return new MaterialDto(
@@ -417,7 +422,54 @@ public class MaterialService {
                 entity.getWidth(),
                 entity.getHeight(),
                 entity.getSrtFileName(),
-                entity.getCreatedAt());
+                subtitleAvailable(entity),
+                entity.getCreatedAt(),
+                entity.getUpdatedAt());
+    }
+
+    /**
+     * 该素材当前能否解析到字幕。
+     *
+     * <p>刻意复用 {@code SubtitleService#forVideo} 的<b>三级顺序</b>，只判断文件是否存在、不读内容
+     * （列表接口要跑 N 次，读全文会把素材页拖慢）：
+     * <ol>
+     *   <li>素材行登记的 {@code srt_file_name}（用户上传的那份）；</li>
+     *   <li>{@code media.subtitle-mapping} 静态白名单映射（内置示例素材配套的 SRT）；</li>
+     *   <li>兼容旧写法 {@code {文件名}.srt}，只接受安全字符。</li>
+     * </ol>
+     *
+     * <p><b>为什么不用 {@code srtFileName != null} 代替</b>：内置示例素材的登记值就是 null，
+     * 它靠第 2 步映射到 {@code candidateflow-demo.srt}，实际有字幕。只判断登记值会让首页
+     * 把有字幕的素材标成「无字幕」，用户点进去却看到字幕，属于前后不一致的假信息。
+     *
+     * <p>顺序不能颠倒：登记了但文件缺失时，{@code SubtitleService} 会直接报
+     * {@code SUBTITLE_READ_FAILED} 而不回落到静态字幕（避免用别人的字幕冒充），
+     * 所以这里也必须先看登记值、命中即返回 true，不能继续往下匹配。
+     */
+    private boolean subtitleAvailable(MaterialEntity entity) {
+        String registered = entity.getSrtFileName();
+        if (registered != null && !registered.isBlank()) {
+            Path root = materialProperties.root();
+            Path path = root.resolve(registered).normalize();
+            return path.startsWith(root) && Files.isRegularFile(path);
+        }
+
+        String videoName = entity.getFileName();
+        if (videoName == null || videoName.isBlank()) {
+            return false;
+        }
+        Optional<String> mapped = mediaProperties.subtitleNameOf(videoName);
+        if (mapped.isPresent() && mediaProperties.resolveSubtitle(mapped.get()).isPresent()) {
+            return true;
+        }
+
+        String legacy = videoName + ".srt";
+        if (legacy.matches("^[A-Za-z0-9_\\-]{1,120}\\.srt$")) {
+            Path root = materialProperties.root();
+            Path path = root.resolve(legacy).normalize();
+            return path.startsWith(root) && Files.isRegularFile(path);
+        }
+        return false;
     }
 
     /** 内置示例素材 id（历史 cases 的归属）。 */

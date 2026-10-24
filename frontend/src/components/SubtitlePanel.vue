@@ -3,6 +3,8 @@ import { computed, ref, watch } from 'vue'
 import type { SubtitleSource, UnifiedCue } from '@/types/api'
 import { formatTime } from '@/constants/meta'
 import { usePlayerStore } from '@/stores/player'
+import LpSkeletonList from '@/components/LpSkeletonList.vue'
+import LpState from '@/components/LpState.vue'
 import SegmentedField from '@/components/SegmentedField.vue'
 
 const props = defineProps<{
@@ -45,7 +47,7 @@ const sourceHint = computed(() => {
       ? '保利威智能字幕（云端机器生成，条数与分段与本地 SRT 不同，需人工核对）'
       : '保利威智能字幕尚未就绪：请先在「素材与字幕」页创建或查询任务'
   }
-  return props.subtitleFile ? `本地演示字幕（SRT 解析）· ${props.subtitleFile}` : '本地演示字幕（SRT 解析）'
+  return props.subtitleFile ? `本地字幕（SRT 解析）· ${props.subtitleFile}` : '本地字幕（SRT 解析）'
 })
 
 const visibleCues = computed(() => {
@@ -53,6 +55,36 @@ const visibleCues = computed(() => {
   const start = props.windowStart ?? 0
   const end = props.windowEnd ?? Number.POSITIVE_INFINITY
   return props.cues.filter((cue) => cue.endSec > start && cue.startSec < end)
+})
+
+/**
+ * 空字幕的状态文案。
+ *
+ * <p>「没有选中事项」与「这个视频真的没有字幕」是两回事，不能都说成后者：
+ * 空事项列表下后者会让人以为素材缺字幕，实际只是还没选要核哪一条。
+ */
+const subtitleEmpty = computed<{ title: string; description: string }>(() => {
+  if (!props.videoName) {
+    return {
+      title: '还没有选中核验事项',
+      description: '字幕会随选中的事项加载，先在左侧选一条。',
+    }
+  }
+  if (props.cues.length === 0) {
+    return props.source === 'cloud'
+      ? {
+          title: '云端暂无可显示字幕',
+          description: '云端字幕还没有就绪的任务，可在素材库创建或查询。',
+        }
+      : {
+          title: '该视频没有配套字幕',
+          description: '没有找到这个视频的 SRT 字幕文件，可在素材库上传。',
+        }
+  }
+  return {
+    title: '时间窗内没有字幕',
+    description: '当前问题的时间范围内没有字幕句子，可点上方开关查看全片字幕。',
+  }
 })
 
 const currentIndex = computed(() => {
@@ -94,20 +126,13 @@ function jump(cue: UnifiedCue) {
 
     <div ref="listRef" class="lp-scroll" style="flex: 1 1 auto; padding: 6px 8px 10px">
       <div v-if="error" class="lp-note warn" style="margin: 4px">{{ error }}</div>
-      <div v-else-if="loading" class="lp-empty">正在获取字幕…</div>
-      <div v-else-if="visibleCues.length === 0" class="lp-empty">
-        {{
-          // 「没有选中事项」与「这个视频真的没有字幕」是两回事，不能都说成后者：
-          // 空事项列表下后者会让人以为素材缺字幕，实际只是还没选要核哪一条
-          !videoName
-            ? '还没有选中核验事项，字幕会随选中事项加载'
-            : cues.length === 0
-              ? source === 'cloud'
-                ? '云端暂无可显示字幕'
-                : '该视频没有配套字幕文件'
-              : '当前问题的时间窗内没有字幕'
-        }}
-      </div>
+      <LpSkeletonList v-else-if="loading" :rows="4" />
+      <LpState
+        v-else-if="visibleCues.length === 0"
+        compact
+        :title="subtitleEmpty.title"
+        :description="subtitleEmpty.description"
+      />
       <div
         v-for="cue in visibleCues"
         :key="`${cue.source}-${cue.index}`"

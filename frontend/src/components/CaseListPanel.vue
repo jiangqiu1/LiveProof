@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import LpSkeletonList from '@/components/LpSkeletonList.vue'
+import LpState from '@/components/LpState.vue'
 import type { CaseListItem, ReviewStatus } from '@/types/api'
 import { REVIEW_STATUS_LABEL, formatRange, reviewTone } from '@/constants/meta'
 
@@ -22,7 +24,6 @@ const emit = defineEmits<{
 
 const keyword = ref('')
 const reviewFilter = ref<ReviewStatus | 'all'>('all')
-const searchRef = ref<{ focus?: () => void } | null>(null)
 
 const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
@@ -39,17 +40,20 @@ function indexOf(id: string) {
   return index >= 0 ? index + 1 : 0
 }
 
-function focusSearch() {
-  searchRef.value?.focus?.()
-}
-
 /**
  * 回答状态的显示口径。
  *
- * <p>后端默认落 not_found 作为占位值，此时它<b>不代表</b>「视频没有这样说」，
- * 所以在尚未核验时显示灰标「尚未核验」，而不是把 not_found 直接翻译出来。
+ * <p>两件事必须分开：
+ * <ul>
+ *   <li>{@code answerStatus === null} —— 还没判定过（V8 起新建/导入都是 NULL），不显示标签；</li>
+ *   <li>{@code answerStatus === 'not_found'} —— 已经判定「视频里没有找到回答」，照实显示。</li>
+ * </ul>
+ *
+ * <p>{@code reviewStatus === 'unreviewed'} 的兜底是给历史数据留的：V8 之前新建的事项
+ * 会在库里留下 not_found 占位值，清理迁移之外的环境仍应显示成未核验。
  */
 function answerLabel(item: CaseListItem): string | null {
+  if (!item.answerStatus) return null
   if (item.reviewStatus === 'unreviewed') return null
   if (item.answerStatus === 'answered') return '已回答'
   if (item.answerStatus === 'partially_answered') return '部分回答'
@@ -57,12 +61,16 @@ function answerLabel(item: CaseListItem): string | null {
 }
 
 function answerTone(item: CaseListItem): string {
+  if (!item.answerStatus) return 'ghost'
   if (item.answerStatus === 'answered') return 'mint'
   if (item.answerStatus === 'partially_answered') return 'ink'
   return 'warn'
 }
 
-defineExpose({ focusSearch })
+function clearFilters() {
+  keyword.value = ''
+  reviewFilter.value = 'all'
+}
 </script>
 
 <template>
@@ -74,7 +82,6 @@ defineExpose({ focusSearch })
 
     <div style="padding: 10px 12px 6px; display: flex; flex-direction: column; gap: 8px">
       <el-input
-        ref="searchRef"
         v-model="keyword"
         placeholder="搜索问题标题…"
         size="small"
@@ -117,9 +124,34 @@ defineExpose({ focusSearch })
     </div>
 
     <div class="lp-scroll" style="flex: 1 1 auto; padding: 2px 8px 10px">
-      <div v-if="error" class="lp-note warn" style="margin: 6px 4px">{{ error }}</div>
-      <div v-else-if="loading" class="lp-empty">正在加载核验用例…</div>
-      <div v-else-if="filtered.length === 0" class="lp-empty">没有匹配的问题</div>
+      <!-- 失败整块替换列表：请求失败 ≠ 没有问题 -->
+      <LpState v-if="error" variant="error" compact title="事项列表加载失败" :description="error" />
+      <LpSkeletonList v-else-if="loading" :rows="4" />
+      <!-- 搜索/筛选无命中 ≠ 没有问题：给清除入口 -->
+      <LpState
+        v-else-if="filtered.length === 0 && cases.length > 0"
+        variant="search"
+        compact
+        title="没有匹配的问题"
+        :description="keyword.trim() ? `没有标题包含「${keyword.trim()}」的事项，换个关键词试试。` : '当前筛选状态下没有事项。'"
+      >
+        <template #actions>
+          <button
+            type="button"
+            class="lp-btn"
+            style="height: 26px; padding: 0 12px; font-size: 12px"
+            @click="clearFilters"
+          >
+            清除搜索与筛选
+          </button>
+        </template>
+      </LpState>
+      <LpState
+        v-else-if="filtered.length === 0"
+        compact
+        title="还没有核验事项"
+        description="这个素材下还没有录入任何待核验的产品承诺。"
+      />
       <div
         v-for="item in filtered"
         :key="item.id"

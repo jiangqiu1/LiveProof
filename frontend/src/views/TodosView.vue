@@ -3,6 +3,8 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { completeTodo, fetchCases, fetchTodos, updateTodo } from '@/api'
 import { describeError } from '@/api/client'
+import LpSkeletonList from '@/components/LpSkeletonList.vue'
+import LpState from '@/components/LpState.vue'
 import type { CaseListItem, Todo, TodoStatus } from '@/types/api'
 import { TODO_STATUS_LABEL, TODO_STATUS_OPTIONS, formatDateTime, todoTone } from '@/constants/meta'
 import TodoFormDialog from '@/components/TodoFormDialog.vue'
@@ -103,7 +105,7 @@ onMounted(load)
   <div class="lp-page">
     <header class="lp-page-head">
       <div>
-        <div class="lp-crumb">工作台 <span class="sep">/</span> 待办复盘</div>
+        <div class="lp-crumb">首页 <span class="sep">/</span> 待办复盘</div>
         <h1 class="lp-page-title">待办复盘</h1>
         <p class="lp-page-sub">把尚未被演示证明的问题转成待办，逐条补录后再回到工作台改判。</p>
       </div>
@@ -149,11 +151,45 @@ onMounted(load)
       </div>
 
       <div class="lp-page-body">
-        <div v-if="error" class="lp-note warn" style="margin: 12px">{{ error }}</div>
-        <div v-if="!loading && filtered.length === 0" class="lp-empty">
-          还没有待办。可在核验面板点「创建后续待办」，或点右上角新建。
-        </div>
-        <el-table :data="filtered" size="small" style="width: 100%" empty-text="暂无待办">
+        <!-- 请求失败：整块替换表格（失败 ≠ 没有待办） -->
+        <LpState
+          v-if="error && todos.length === 0"
+          variant="error"
+          title="待办列表加载失败"
+          :description="error"
+        >
+          <template #actions>
+            <button type="button" class="lp-btn lp-btn-primary" :disabled="loading" @click="load">
+              {{ loading ? '重试中…' : '重新加载' }}
+            </button>
+          </template>
+        </LpState>
+        <LpSkeletonList v-else-if="loading && todos.length === 0" :rows="5" />
+        <!-- 筛选无命中 ≠ 没有待办：给清除筛选入口 -->
+        <LpState
+          v-else-if="todos.length > 0 && filtered.length === 0"
+          variant="search"
+          title="该状态下没有待办"
+          description="换一个状态看看，或切回「全部状态」。"
+        >
+          <template #actions>
+            <button type="button" class="lp-btn" @click="statusFilter = 'all'">查看全部状态</button>
+          </template>
+        </LpState>
+        <LpState
+          v-else-if="todos.length === 0"
+          title="还没有待办"
+          description="核验中发现没能被演示证明的问题时，在右栏点「创建后续待办」；也可以直接点右上角手动新建。"
+        >
+          <template #actions>
+            <button type="button" class="lp-btn lp-btn-primary" @click="openCreate">新建待办</button>
+          </template>
+        </LpState>
+        <template v-else>
+          <div v-if="error" class="lp-note warn" style="margin: 12px">
+            {{ error }}
+          </div>
+          <el-table :data="filtered" size="small" style="width: 100%" empty-text="暂无待办">
           <el-table-column label="标题" min-width="240">
             <template #default="{ row }">
               <div style="font-weight: 500; color: var(--lp-ink)">{{ row.title }}</div>
@@ -215,6 +251,7 @@ onMounted(load)
             </template>
           </el-table-column>
         </el-table>
+        </template>
       </div>
     </section>
 

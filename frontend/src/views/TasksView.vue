@@ -4,6 +4,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchCases, fetchMaterialCapabilities, fetchMaterials } from '@/api'
 import { describeError } from '@/api/client'
+import LpSkeletonList from '@/components/LpSkeletonList.vue'
+import LpState from '@/components/LpState.vue'
 import type { CaseListItem, Material, MaterialCapabilities } from '@/types/api'
 import { formatDateTime } from '@/constants/meta'
 
@@ -75,21 +77,38 @@ onMounted(load)
   <div class="lp-page">
     <header class="lp-page-head">
       <div>
-        <div class="lp-crumb">工作台 <span class="sep">/</span> 核验任务</div>
-        <h1 class="lp-page-title">核验任务</h1>
+        <div class="lp-crumb">首页 <span class="sep">/</span> 核验项目</div>
+        <h1 class="lp-page-title">核验项目</h1>
         <p class="lp-page-sub">
-          一份演示视频对应一个核验任务：先准备素材与字幕，再录入待核验的产品承诺。
+          一份演示视频对应一个核验项目：先准备素材与字幕，再录入待核验的产品承诺。
         </p>
       </div>
       <div class="lp-page-actions">
-        <button type="button" class="lp-btn lp-btn-primary" @click="newTask">新建核验任务</button>
+        <button type="button" class="lp-btn lp-btn-primary" @click="newTask">新建核验项目</button>
       </div>
     </header>
 
     <div class="lp-page-body">
-      <div v-if="error" class="lp-note warn" style="margin-bottom: 14px">{{ error }}</div>
+      <!-- 失败时列表区必须显示错误态而不是「还没有素材」：请求失败 ≠ 没有数据 -->
+      <LpState
+        v-if="error && materials.length === 0"
+        variant="error"
+        title="素材列表加载失败"
+        :description="error"
+      >
+        <template #actions>
+          <button type="button" class="lp-btn lp-btn-primary" :disabled="loading" @click="load">
+            {{ loading ? '重试中…' : '重新加载' }}
+          </button>
+        </template>
+      </LpState>
 
-      <div class="lp-entry-grid" style="margin-bottom: 16px">
+      <template v-else>
+        <div v-if="error" class="lp-note warn" style="margin-bottom: 14px">
+          {{ error }}
+        </div>
+
+        <div class="lp-entry-grid" style="margin-bottom: 16px">
         <button type="button" class="lp-entry-card" @click="openSample">
           <div class="t">体验内置示例</div>
           <div class="d">
@@ -105,7 +124,7 @@ onMounted(load)
         </button>
 
         <button type="button" class="lp-entry-card" @click="newTask">
-          <div class="t">新建核验任务</div>
+          <div class="t">新建核验项目</div>
           <div class="d">
             上传一段演示视频到保利威点播，等转码完成后准备字幕（智能字幕或 SRT），
             再手动录入或批量导入待核验的产品承诺。
@@ -125,8 +144,16 @@ onMounted(load)
           <span class="lp-pill ghost">{{ materials.length }} 个 · 共 {{ totalCases }} 条事项</span>
         </div>
         <div style="padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 8px">
-          <div v-if="loading && materials.length === 0" class="lp-empty">正在加载素材…</div>
-          <div v-else-if="materials.length === 0" class="lp-empty">还没有素材</div>
+          <LpSkeletonList v-if="loading && materials.length === 0" :rows="4" />
+          <LpState
+            v-else-if="materials.length === 0"
+            title="还没有素材"
+            description="新建核验项目时上传的演示视频会出现在这里；内置示例无需上传，点上方卡片即可体验。"
+          >
+            <template #actions>
+              <button type="button" class="lp-btn lp-btn-primary" @click="newTask">新建核验项目</button>
+            </template>
+          </LpState>
           <div
             v-for="item in materials"
             :key="item.id"
@@ -158,6 +185,7 @@ onMounted(load)
           </div>
         </div>
       </section>
+      </template>
     </div>
   </div>
 </template>

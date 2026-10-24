@@ -1,5 +1,7 @@
 package com.liveproof.controller;
 
+import com.liveproof.dto.CaseCandidateBatchRequest;
+import com.liveproof.dto.CaseCandidateBatchResult;
 import com.liveproof.dto.CaseCreateRequest;
 import com.liveproof.dto.CaseDetail;
 import com.liveproof.dto.CaseImportPreviewDto;
@@ -14,6 +16,7 @@ import com.liveproof.enums.EvidenceType;
 import com.liveproof.enums.ReviewStatus;
 import com.liveproof.enums.ValueEnum;
 import com.liveproof.exception.BadRequestException;
+import com.liveproof.service.CaseCandidateService;
 import com.liveproof.service.CaseImportService;
 import com.liveproof.service.CaseService;
 import jakarta.validation.Valid;
@@ -47,10 +50,13 @@ public class CaseController {
 
     private final CaseService caseService;
     private final CaseImportService caseImportService;
+    private final CaseCandidateService caseCandidateService;
 
-    public CaseController(CaseService caseService, CaseImportService caseImportService) {
+    public CaseController(CaseService caseService, CaseImportService caseImportService,
+                          CaseCandidateService caseCandidateService) {
         this.caseService = caseService;
         this.caseImportService = caseImportService;
+        this.caseCandidateService = caseCandidateService;
     }
 
     @GetMapping("/datasets")
@@ -79,6 +85,19 @@ public class CaseController {
     @PostMapping("/cases")
     public ResponseEntity<CaseDetail> create(@RequestBody CaseCreateRequest request) {
         return ResponseEntity.status(HttpStatus.CREATED).body(caseService.create(request));
+    }
+
+    /**
+     * 把用户勾选过的 AI 候选事项确认入库。
+     *
+     * <p>与 {@code POST /api/cases} 的区别只有两点：来源固定记 {@code ai}；
+     * 一次提交多条且<b>要么全写入、要么整批拒绝</b>。
+     * 核验字段的默认值完全一致——写进来的是「尚未核验」。
+     */
+    @PostMapping("/cases/from-candidates")
+    public ResponseEntity<CaseCandidateBatchResult> createFromCandidates(
+            @RequestBody CaseCandidateBatchRequest request) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(caseCandidateService.createBatch(request));
     }
 
     // ------------------------------------------------------------------ CSV 导入

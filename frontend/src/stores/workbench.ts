@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
-import { describeError } from '@/api/client'
+import { ApiError, describeError } from '@/api/client'
 import {
   createCase,
   deleteCase,
@@ -68,6 +68,14 @@ export const useWorkbenchStore = defineStore('workbench', () => {
   const loading = reactive({ cases: false, detail: false, subtitles: false, materials: false })
   const saving = ref(false)
   const lastSavedAt = ref<string | null>(null)
+
+  /**
+   * 详情加载失败时的错误码（{@code CASE_NOT_FOUND} / {@code NETWORK_ERROR} / null）。
+   *
+   * <p>只存文案没法区分「这条事项不存在」和「后端根本没连上」：
+   * 前者要清掉地址栏里失效的 {@code ?case=} 并回退，后者必须保留 URL 等用户重试。
+   */
+  const detailErrorCode = ref<string | null>(null)
 
   const activeCase = computed(() => detail.value)
   const videoName = computed(() => detail.value?.video ?? subtitle.value?.video ?? null)
@@ -197,6 +205,7 @@ export const useWorkbenchStore = defineStore('workbench', () => {
   async function loadDetail(id: string) {
     loading.detail = true
     errors.detail = null
+    detailErrorCode.value = null
     try {
       const data = await fetchCase(id)
       detail.value = data
@@ -209,6 +218,7 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       }
     } catch (error) {
       errors.detail = describeError(error)
+      detailErrorCode.value = error instanceof ApiError ? error.code : null
       detail.value = null
     } finally {
       loading.detail = false
@@ -288,9 +298,13 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     saving.value = true
     try {
       const updated = await patchCase(id, payload)
-      detail.value = updated
+      // 请求在途时用户可能已切到别的事项：此时把旧用例的详情写回会覆盖新事项的编辑态。
+      // 左栏状态仍然要同步（那是这个用例自己的属性），详情只在仍停留于该用例时才写回。
       syncListItem(updated)
-      lastSavedAt.value = updated.updatedAt
+      if (activeCaseId.value === id) {
+        detail.value = updated
+        lastSavedAt.value = updated.updatedAt
+      }
       return updated
     } finally {
       saving.value = false
@@ -319,9 +333,16 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     }
   }
 
-  /** 导入完成后刷新左栏（导入的写入由后端事务保证，前端只重读）。 */
-  async function reloadCases() {
+  /**
+   * 导入完成后刷新左栏（导入的写入由后端事务保证，前端只重读）。
+   *
+   * @param options.keepActive 为 true 时即使当前事项已不在列表中也不自动切换。
+   *   自动切换会覆盖右栏正在编辑的草稿，而 Store 无法判断 {@code dirty}；
+   *   需要切换时由视图层在确认后再显式调用 {@code selectCase}。
+   */
+  async function reloadCases(options: { keepActive?: boolean } = {}) {
     cases.value = await fetchCases('cf', materialId.value)
+    if (options.keepActive) return
     if (activeCaseId.value && !cases.value.some((item) => item.id === activeCaseId.value)) {
       await selectCase(cases.value.length > 0 ? cases.value[0].id : null)
     }
@@ -346,6 +367,7 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     cloudTask,
     cloudSwitching,
     errors,
+    detailErrorCode,
     loading,
     saving,
     lastSavedAt,

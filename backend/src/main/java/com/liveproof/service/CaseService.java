@@ -136,8 +136,9 @@ public class CaseService {
     /**
      * 手动新增核验事项。
      *
-     * <p>{@code reviewStatus} 强制 {@code unreviewed}、{@code answerStatus} 落库默认值
-     * {@code not_found}（占位值）、{@code evidenceType} 不预设：客户端无法直接把一条事项标成已核验。
+     * <p>{@code reviewStatus} 强制 {@code unreviewed}；{@code answerStatus} <b>落 NULL</b>
+     * （未核验，不是 not_found）；{@code evidenceType} 固定 unknown、{@code evidenceSufficiency}
+     * 固定 not_checked。客户端无法直接把一条事项标成已核验。
      */
     public CaseDetail create(CaseCreateRequest request) {
         return create(request, "manual");
@@ -187,9 +188,11 @@ public class CaseService {
         entity.setStartSec(start);
         entity.setEndSec(end);
         entity.setReviewStatus(ReviewStatus.UNREVIEWED);
-        entity.setAnswerStatus(AnswerStatus.NOT_FOUND);
-        // 四字段必须全部落值：evidence_type 列允许 NULL，漏设会让新行走进「未定义」分支，
-        // 前端无法把 null 渲染成「待确认」，报告归类也会漏掉这一行。固定为 unknown，需人工改判。
+        // answerStatus 故意不设：列默认 NULL，表示「尚未核验」。
+        // 以前塞 NOT_FOUND 当占位，导致新建事项在界面上直接显示「未找到回答」，
+        // 与「核验过但视频里确实没有回答」无法区分（V8 迁移已把默认值改为 NULL）。
+        // 四字段里的另外两个仍要落值：evidence_type 列允许 NULL，漏设会让新行走进
+        // 「未定义」分支，前端无法把 null 渲染成「待确认」，报告归类也会漏掉这一行。
         entity.setEvidenceType(EvidenceType.UNKNOWN);
         entity.setEvidenceSufficiency(EvidenceSufficiency.NOT_CHECKED);
         entity.setReasoning(reasoning);

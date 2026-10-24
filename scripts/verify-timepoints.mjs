@@ -226,7 +226,7 @@ async function main() {
     }
 
     // ---- 1. 打开工作台 ----
-    await client.send('Page.navigate', { url: BASE + '/' })
+    await client.send('Page.navigate', { url: BASE + '/workbench' })
     const first = await boot()
     report.steps.push({ step: '1 打开工作台', ...first })
     if (first.question !== target.question) {

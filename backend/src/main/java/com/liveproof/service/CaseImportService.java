@@ -38,7 +38,7 @@ import java.util.Set;
  * <ul>
  *   <li>CSV 里<b>不接受</b>核验结论类列（reviewStatus / answerStatus / evidenceType /
  *       evidenceSufficiency）。出现这些列直接整批拒收，避免「导入即已核验」。</li>
- *   <li>导入产生的行一律 {@code reviewStatus=unreviewed}、{@code answerStatus=not_found}（占位）、
+ *   <li>导入产生的行一律 {@code reviewStatus=unreviewed}、{@code answerStatus=NULL}（尚未核验）、
  *       {@code evidenceSufficiency=not_checked}、{@code source=csv}。</li>
  *   <li>预览<b>不写库</b>；只有显式执行导入才落库。</li>
  *   <li>CSV 导入是<b>人工整理的清单</b>，不是 AI 自动生成，接口返回里也不含任何模型调用。</li>
@@ -365,8 +365,13 @@ public class CaseImportService {
         return keys;
     }
 
-    /** 归一：去全部空白与常见标点后小写，避免「能改到 5000」与「能改到5000。」被判为不同。 */
-    static String key(String question) {
+    /**
+     * 归一：去全部空白与常见标点后小写，避免「能改到 5000」与「能改到5000。」被判为不同。
+     *
+     * <p>公开给 AI 候选提取复用：同一个素材下「AI 想出来的问题」与「导入进来的问题」
+     * 必须用同一把尺子判重，否则同一句话会在两处各有一份。
+     */
+    public static String key(String question) {
         return question.replaceAll("[\\s\\p{Punct}，。：；！？、（）“”‘’《》]", "").toLowerCase(Locale.ROOT);
     }
 

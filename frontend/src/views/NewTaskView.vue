@@ -15,6 +15,9 @@ import type { Material, MaterialCapabilities, SmartSubtitleTask } from '@/types/
 import MaterialUploader from '@/components/MaterialUploader.vue'
 import NewCaseDialog from '@/components/NewCaseDialog.vue'
 import CsvImportDialog from '@/components/CsvImportDialog.vue'
+import AiCandidateDialog from '@/components/AiCandidateDialog.vue'
+import LpSkeletonList from '@/components/LpSkeletonList.vue'
+import LpState from '@/components/LpState.vue'
 
 const router = useRouter()
 
@@ -44,6 +47,8 @@ const POLL_INTERVAL_MS = 3000
 /* ---------- 第 3 步：核验事项 ---------- */
 const caseDialog = ref(false)
 const csvDialog = ref(false)
+const aiDialog = ref(false)
+const aiCreated = ref(0)
 const manualCreated = ref(0)
 const importedCount = ref(0)
 
@@ -79,6 +84,7 @@ const cloudStatusLabel = computed(() => {
 
 const caseCountLabel = computed(() => {
   const parts: string[] = []
+  if (aiCreated.value > 0) parts.push(`AI 候选 ${aiCreated.value} 条`)
   if (manualCreated.value > 0) parts.push(`手动新增 ${manualCreated.value} 条`)
   if (importedCount.value > 0) parts.push(`CSV 导入 ${importedCount.value} 条`)
   return parts.length > 0 ? parts.join(' · ') : '还没有录入核验事项'
@@ -247,6 +253,10 @@ function onImported(count: number) {
   importedCount.value += count
 }
 
+function onAiCreated(count: number) {
+  aiCreated.value += count
+}
+
 function goPrev() {
   if (step.value > 0) step.value -= 1
 }
@@ -282,15 +292,15 @@ onBeforeUnmount(stopPoll)
     <header class="lp-page-head">
       <div>
         <div class="lp-crumb">
-          核验任务 <span class="sep">/</span> 新建
+          首页 <span class="sep">/</span> 核验项目 <span class="sep">/</span> 新建
         </div>
-        <h1 class="lp-page-title">新建核验任务</h1>
+        <h1 class="lp-page-title">新建核验项目</h1>
         <p class="lp-page-sub">
           三步走：先确定素材，再准备字幕，最后录入待核验的产品承诺。任何一步都不会自动替你下结论。
         </p>
       </div>
       <div class="lp-page-actions">
-        <button type="button" class="lp-btn" @click="router.push({ name: 'tasks' })">返回任务列表</button>
+        <button type="button" class="lp-btn" @click="router.push({ name: 'tasks' })">返回项目列表</button>
       </div>
     </header>
 
@@ -311,10 +321,27 @@ onBeforeUnmount(stopPoll)
             <span class="lp-pill ghost">{{ readyMaterials.length }} 个可用</span>
           </div>
           <div style="padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 8px">
-            <div v-if="loading && materials.length === 0" class="lp-empty">正在加载素材…</div>
-            <div v-else-if="readyMaterials.length === 0" class="lp-empty">
-              还没有可用的素材。请在右侧上传一段 mp4 演示视频。
-            </div>
+            <!-- 失败整块替换列表：加载失败 ≠ 没有素材 -->
+            <LpState
+              v-if="error && materials.length === 0"
+              variant="error"
+              compact
+              title="素材列表加载失败"
+              :description="error"
+            >
+              <template #actions>
+                <button type="button" class="lp-btn" :disabled="loading" @click="load">
+                  {{ loading ? '重试中…' : '重新加载' }}
+                </button>
+              </template>
+            </LpState>
+            <LpSkeletonList v-else-if="loading && materials.length === 0" :rows="3" />
+            <LpState
+              v-else-if="readyMaterials.length === 0"
+              compact
+              title="还没有可用的素材"
+              description="在右侧上传一段 mp4 演示视频，转码就绪后就能选择。"
+            />
             <div
               v-for="item in readyMaterials"
               :key="item.id"
@@ -456,6 +483,15 @@ onBeforeUnmount(stopPoll)
             <span class="lp-pill ghost">{{ caseCountLabel }}</span>
           </div>
           <div style="padding: 12px 14px; display: flex; flex-direction: column; gap: 10px">
+            <div class="lp-radio-card" @click="aiDialog = true">
+              <div>
+                <div class="t">AI 从字幕生成候选</div>
+                <div class="d">
+                  读取当前素材整段字幕，提取「值得核验的产品承诺」并生成候选清单，可预览、逐条编辑、去重后勾选入库。
+                  生成只调一次模型、不写库；入库的事项同样是「尚未核验」，AI 不替你下结论。
+                </div>
+              </div>
+            </div>
             <div class="lp-radio-card" @click="caseDialog = true">
               <div>
                 <div class="t">手动新增一条</div>
@@ -528,6 +564,12 @@ onBeforeUnmount(stopPoll)
       :material-id="selectedId"
       :materials="materials"
       @imported="(result) => onImported(result.imported)"
+    />
+    <AiCandidateDialog
+      v-model="aiDialog"
+      :material-id="selectedId"
+      :material="selected"
+      @created="onAiCreated"
     />
   </div>
 </template>

@@ -190,7 +190,8 @@ async function main() {
       mobile: false,
     })
 
-    await client.send('Page.navigate', { url: BASE + '/' })
+    // 工作台已从 / 迁到 /workbench，根路径现在是产品首页
+    await client.send('Page.navigate', { url: BASE + '/workbench' })
     await sleep(1500)
     await evaluate(client, PRELUDE, false)
 
@@ -302,7 +303,11 @@ async function main() {
     if (layoutInfo.cardBottom > layoutInfo.innerHeight) {
       report.problems.push(`右栏卡片超出视口：bottom=${layoutInfo.cardBottom} > ${layoutInfo.innerHeight}`)
     }
-    if (!layoutInfo.panelScrollable) report.problems.push('右栏内容不可滚动（可能被裁切）')
+    // AI 解释收进问号浮层、删除冗余按钮后，右栏通常已完整放进一屏（scrollHeight == clientHeight）。
+    // 只有内容真的超出视口时才要求内部可滚动。
+    if (layoutInfo.cardBottom > layoutInfo.innerHeight && !layoutInfo.panelScrollable) {
+      report.problems.push(`右栏超出视口（bottom=${layoutInfo.cardBottom}）且内部不可滚动`)
+    }
     if (!layoutInfo.footVisibleAfterScroll) report.problems.push('滚动后仍看不到保存按钮')
     await sleep(200)
     await shot(client, '06-review-bottom.png')
@@ -382,7 +387,9 @@ async function main() {
     await evaluate(
       client,
       `(async () => {
-        const btn = Array.from(document.querySelectorAll('.lp-page-actions .lp-btn-primary'))[0];
+        // 顶部「保存核验结果」按钮已删除（第五轮瘦身），保存入口只剩右栏底部
+        const btn = Array.from(document.querySelectorAll('.lp-btn')).find((b) => /保存核验结果/.test(b.textContent));
+        if (!btn) throw new Error('未找到右栏底部保存按钮');
         btn.click();
         await window.__lp.until(() => !document.querySelector('.lp-dirty'), 15000, '保存完成');
         return true;
@@ -495,9 +502,10 @@ async function main() {
 
     // ---- 8. 其它页面截图与溢出检查 ----
     const pages = [
-      { path: '/materials', name: '03-media.png', title: '视频素材' },
+      { path: '/materials', name: '03-media.png', title: '素材库' },
       { path: '/records', name: '04-records.png', title: '核验记录' },
-      { path: '/', name: '05-workbench.png', title: '视频证据核验' },
+      { path: '/workbench', name: '05-workbench.png', title: '视频证据核验' },
+      { path: '/tasks', name: '06-tasks.png', title: '核验项目' },
     ]
     const overflowAll = []
     for (const page of pages) {

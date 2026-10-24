@@ -142,7 +142,7 @@ async function main() {
 
     // ---- 工作台默认态 ----
     if (!ONLY || ['01', '02'].includes(ONLY)) {
-      await client.send('Page.navigate', { url: BASE + '/' })
+      await client.send('Page.navigate', { url: BASE + '/workbench' })
       await sleep(2600)
       await evaluate(client, PRELUDE)
 

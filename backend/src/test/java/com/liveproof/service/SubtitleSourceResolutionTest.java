@@ -85,6 +85,7 @@ class SubtitleSourceResolutionTest {
         SubtitleResponse response = service(media, mapper).forVideo("candidateflow-demo-nosub.mp4");
 
         assertThat(response.subtitleFile()).isEqualTo("mat_builtin_demo_nosub.srt");
+        assertThat(response.source()).isEqualTo(SubtitleResponse.SOURCE_UPLOADED);
         assertThat(response.cues()).hasSize(1);
         assertThat(response.cues().get(0).text()).isEqualTo("用户上传的字幕");
     }
@@ -121,7 +122,25 @@ class SubtitleSourceResolutionTest {
         SubtitleResponse response = service(media, mapper).forVideo("candidateflow-demo.mp4");
 
         assertThat(response.subtitleFile()).isEqualTo("candidateflow-demo.srt");
+        assertThat(response.source()).isEqualTo(SubtitleResponse.SOURCE_MAPPING);
         assertThat(response.cues().get(0).text()).isEqualTo("内置配套字幕");
+    }
+
+    @Test
+    @DisplayName("既没登记也没映射：{标识}.srt 回退命中时来源标为 legacy")
+    void legacyFileFallbackReportsLegacySource() throws Exception {
+        Files.writeString(uploadDir.resolve("mat_legacy.srt"), UPLOADED);
+
+        MediaProperties media = mock(MediaProperties.class);
+        when(media.subtitleNameOf("mat_legacy")).thenReturn(Optional.empty());
+
+        MaterialMapper mapper = mock(MaterialMapper.class);
+        when(mapper.selectById("mat_legacy")).thenReturn(material("mat_legacy", null, null));
+
+        SubtitleResponse response = service(media, mapper).forVideo("mat_legacy");
+
+        assertThat(response.subtitleFile()).isEqualTo("mat_legacy.srt");
+        assertThat(response.source()).isEqualTo(SubtitleResponse.SOURCE_LEGACY);
     }
 
     @Test

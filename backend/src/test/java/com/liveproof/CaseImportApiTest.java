@@ -21,7 +21,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * <ol>
  *   <li>预览<b>不写库</b>（cases 行数不变）</li>
  *   <li>结论列（reviewStatus 等）出现即整批 422，不允许「导入即已核验」</li>
- *   <li>导入产生的行一律 unreviewed + not_checked，且 answerStatus 只是占位</li>
+ *   <li>导入产生的行一律 unreviewed + not_checked，answerStatus 为 NULL（尚未核验）</li>
  * </ol>
  */
 class CaseImportApiTest extends ApiTestBase {
@@ -149,7 +149,10 @@ class CaseImportApiTest extends ApiTestBase {
                 // 四字段必须全部有确定取值：experience 表明 create() 曾漏设 evidenceType，
                 // 落库为 NULL（列允许为空），前端拿到 null 会显示空白而非 unknown。
                 .andExpect(jsonPath("$.created[0].evidenceType").value("unknown"))
-                .andExpect(jsonPath("$.created[0].answerStatus").value("not_found"));
+                // V8 起 answerStatus 落 NULL = 尚未核验；not_found 只表示「核验过、视频里没找到回答」，
+                // 两者不能混用，否则新建/导入的事项一出现就自带一个未做的结论。
+                // doesNotExist 同时覆盖「值为 null」与「字段缺失」（Spring 对显式 null 的判定方式）
+                .andExpect(jsonPath("$.created[0].answerStatus").doesNotExist());
 
         assertCaseCount(7);
     }

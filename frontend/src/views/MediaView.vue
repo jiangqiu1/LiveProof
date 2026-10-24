@@ -14,15 +14,18 @@ import {
   refreshSmartSubtitleTask,
   uploadMaterialSubtitle,
 } from '@/api'
-import { describeError } from '@/api/client'
+import { describeError, ApiError } from '@/api/client'
 import type {
   Material,
   MaterialCapabilities,
   SmartSubtitleStatusInfo,
   SmartSubtitleTask,
+  SubtitleFileSource,
 } from '@/types/api'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import MaterialUploader from '@/components/MaterialUploader.vue'
+import LpSkeletonList from '@/components/LpSkeletonList.vue'
+import LpState from '@/components/LpState.vue'
 import { formatDateTime, formatTime } from '@/constants/meta'
 import { usePlayerStore } from '@/stores/player'
 
@@ -39,9 +42,21 @@ const playUrl = ref<string | null>(null)
 const playError = ref<string | null>(null)
 const playLoading = ref(false)
 
-/** 本地字幕状态（沿用既有 /api/subtitles 口径，文案不改） */
-const localSubtitleInfo = ref<{ cueCount: number; subtitleFile: string } | null>(null)
+/**
+ * 当前素材「核验时实际可用」的本地字幕。
+ *
+ * <p>不能只看 {@code materials.srt_file_name}：内置示例素材没有上传过字幕，
+ * 但工作台与 AI 核验通过后端静态映射照样拿到 12 条 cue。素材页若只显示「未上传」，
+ * 用户会以为核验是在没有字幕的情况下做定位——两端口径必须落到同一份数据上。
+ */
+const effectiveSubtitle = ref<{
+  cueCount: number
+  subtitleFile: string
+  source: SubtitleFileSource
+} | null>(null)
 const localSubtitleError = ref<string | null>(null)
+/** 后端明确返回「没有可用字幕」（404 SUBTITLE_NOT_FOUND）：这是正常状态，不是错误 */
+const subtitleMissing = ref(false)
 
 /* ---------- 云端智能字幕（保利威） ---------- */
 const cloudStatus = ref<SmartSubtitleStatusInfo | null>(null)
@@ -86,6 +101,32 @@ const cloudStatusLabel = computed(() => {
   return '可创建任务'
 })
 
+/** 字幕来源的人话标签（后端 source 字段直译，不含任何素材名硬编码） */
+const SUBTITLE_SOURCE_LABEL: Record<SubtitleFileSource, string> = {
+  uploaded: '素材已上传',
+  mapping: '系统内置映射',
+  legacy: '素材目录回退',
+}
+
+const subtitleStateLabel = computed(() => {
+  if (effectiveSubtitle.value) return SUBTITLE_SOURCE_LABEL[effectiveSubtitle.value.source]
+  if (localSubtitleError.value) return '读取失败'
+  return '无可用字幕'
+})
+
+/** 字幕来源卡片里的说明文案：说清楚「没上传」与「没字幕」的区别 */
+const subtitleSourceHint = computed(() => {
+  const current_ = effectiveSubtitle.value
+  if (current_) {
+    if (current_.source === 'uploaded') {
+      return `使用素材页上传的 ${current_.subtitleFile} 解析（${current_.cueCount} 条），不调用任何语音识别服务。`
+    }
+    return `该素材没有上传自有字幕，核验时使用系统提供的 ${current_.subtitleFile}（${current_.cueCount} 条）。上传自有 SRT 会优先覆盖它。`
+  }
+  if (localSubtitleError.value) return '字幕读取失败，具体原因见左侧提示。'
+  return '该素材没有任何可用字幕（既没有上传，也没有系统映射），工作台与 AI 核验拿不到字幕定位依据。'
+})
+
 const cloudReady = computed(() => cloudTask.value?.status === 'ready')
 const materialReady = computed(() => current.value?.status === 'ready')
 
@@ -114,8 +155,9 @@ async function loadCurrent() {
   player.seekTo(0)
   playUrl.value = null
   playError.value = null
-  localSubtitleInfo.value = null
+  effectiveSubtitle.value = null
   localSubtitleError.value = null
+  subtitleMissing.value = false
   cloudTask.value = null
   cloudError.value = null
   if (!material) return
@@ -132,26 +174,37 @@ async function loadCurrent() {
     }
   }
 
-  await loadLocalSubtitle(material)
+  await loadEffectiveSubtitle(material)
   void loadCloudStatus()
 }
 
 /**
- * 读取素材登记的字幕并显示真实条数。
+ * 读取当前素材在核验时真正会用到的那份字幕（含条数与来源）。
  *
- * <p>只有登记了 SRT 才查，避免无意义请求；查失败如实显示，不假装「已上传」。
- * 用文件名而不是素材 id 查询：工作台与 AI 核验也是用同一个标识取字幕，
- * 两边口径必须一致，否则会出现「素材页显示已上传、核验时拿不到」。
+ * <p>无论素材是否登记了 SRT 都要查一次：只有 {@code /api/subtitles} 才知道后端最终
+ * 用了哪份文件（上传的字幕 / 内置映射 / 目录回退 / 根本没有），这也是工作台与
+ * AI 核验使用的同一个入口。用文件名优先、其次素材 id，与工作台的取字幕标识一致。
+ *
+ * <p>404 不算错误：那是「确实没有可用字幕」的正常状态，要如实显示而不是报红。
  */
-async function loadLocalSubtitle(material: Material | null) {
-  localSubtitleInfo.value = null
+async function loadEffectiveSubtitle(material: Material | null) {
+  effectiveSubtitle.value = null
   localSubtitleError.value = null
-  if (!material?.srtFileName) return
+  subtitleMissing.value = false
+  const key = material?.fileName ?? material?.id ?? null
+  if (!key) return
   try {
-    const local = await fetchSubtitles(material.fileName ?? material.id)
-    localSubtitleInfo.value = { cueCount: local.cueCount, subtitleFile: local.subtitleFile }
+    const local = await fetchSubtitles(key)
+    effectiveSubtitle.value = {
+      cueCount: local.cueCount,
+      subtitleFile: local.subtitleFile,
+      source: local.source,
+    }
   } catch (error) {
-    localSubtitleInfo.value = null
+    if (error instanceof ApiError && error.code === 'SUBTITLE_NOT_FOUND') {
+      subtitleMissing.value = true
+      return
+    }
     localSubtitleError.value = describeError(error)
   }
 }
@@ -262,11 +315,11 @@ async function onSrtPicked(event: Event) {
     const index = materials.value.findIndex((item) => item.id === updated.id)
     if (index >= 0) materials.value[index] = updated
     // 条数必须真的去解析一次：写死 0 会让「已上传」看起来像是没生效
-    await loadLocalSubtitle(updated)
+    await loadEffectiveSubtitle(updated)
     ElMessage.success(
       localSubtitleError.value
         ? `已上传字幕：${updated.srtFileName}（但读取失败：${localSubtitleError.value}）`
-        : `已上传字幕：${updated.srtFileName} · ${localSubtitleInfo.value?.cueCount ?? 0} 条`,
+        : `已上传字幕：${updated.srtFileName} · ${effectiveSubtitle.value?.cueCount ?? 0} 条`,
     )
   } catch (error) {
     ElMessage.error(describeError(error))
@@ -283,8 +336,13 @@ async function removeSrt() {
     const updated = await deleteMaterialSubtitle(material.id)
     const index = materials.value.findIndex((item) => item.id === updated.id)
     if (index >= 0) materials.value[index] = updated
-    localSubtitleInfo.value = null
-    ElMessage.success('本地字幕已移除')
+    // 移除后不等于没字幕：内置映射会重新接管，必须重解析一次再告诉用户实际用的是哪份
+    await loadEffectiveSubtitle(updated)
+    ElMessage.success(
+      effectiveSubtitle.value
+        ? `本地字幕已移除，核验改用 ${effectiveSubtitle.value.subtitleFile}（${effectiveSubtitle.value.cueCount} 条）`
+        : '本地字幕已移除，该素材当前没有可用字幕',
+    )
   } catch (error) {
     ElMessage.error(describeError(error))
   } finally {
@@ -315,8 +373,8 @@ onMounted(async () => {
   <div class="lp-page">
     <header class="lp-page-head">
       <div>
-        <div class="lp-crumb">工作台 <span class="sep">/</span> 视频素材</div>
-        <h1 class="lp-page-title">视频素材</h1>
+        <div class="lp-crumb">首页 <span class="sep">/</span> 素材库</div>
+        <h1 class="lp-page-title">素材库</h1>
         <p class="lp-page-sub">
           内置示例走本地 /media 白名单；新上传的视频存入保利威点播，播放与截图均经后端代理，页面不接触路径与密钥。
         </p>
@@ -342,11 +400,36 @@ onMounted(async () => {
             class="lp-scroll"
             style="max-height: 560px; padding: 8px 10px 12px; display: flex; flex-direction: column; gap: 8px"
           >
-            <div v-if="materialsError" class="lp-note warn">{{ materialsError }}</div>
-            <div v-else-if="materialsLoading && materials.length === 0" class="lp-empty">
-              正在加载素材…
+            <!-- 失败整块替换列表：加载失败 ≠ 还没有素材 -->
+            <LpState
+              v-if="materialsError && materials.length === 0"
+              variant="error"
+              compact
+              title="素材列表加载失败"
+              :description="materialsError"
+            >
+              <template #actions>
+                <button
+                  type="button"
+                  class="lp-btn lp-btn-primary"
+                  :disabled="materialsLoading"
+                  @click="loadMaterials()"
+                >
+                  {{ materialsLoading ? '重试中…' : '重新加载' }}
+                </button>
+              </template>
+            </LpState>
+            <LpSkeletonList v-else-if="materialsLoading && materials.length === 0" :rows="3" />
+            <LpState
+              v-else-if="materials.length === 0"
+              compact
+              title="还没有素材"
+              description="点右上角上传一段 mp4 演示视频，或先看左侧的内置示例。"
+            />
+            <!-- 已有数据但刷新失败：保留旧列表可看，顶部提示 -->
+            <div v-if="materialsError && materials.length > 0" class="lp-note warn">
+              {{ materialsError }}
             </div>
-            <div v-else-if="materials.length === 0" class="lp-empty">还没有素材</div>
             <div
               v-for="item in materials"
               :key="item.id"
@@ -387,7 +470,7 @@ onMounted(async () => {
               :play-url="current.storage === 'polyv' ? playUrl : null"
             />
             <div v-else-if="playLoading" class="lp-empty">正在取保利威播放地址…</div>
-            <div v-else class="lp-empty">请选择左侧素材</div>
+            <LpState v-else compact title="还没有选择素材" description="从左侧列表选一个素材开始预览。" />
             <div style="padding: 0 14px 14px; font-size: 12px; color: var(--lp-muted)">
               当前播放位置 {{ formatTime(player.currentTime) }} / {{ formatTime(player.duration) }}，可在播放器中拖动。
             </div>
@@ -402,7 +485,7 @@ onMounted(async () => {
               <span v-if="current" class="lp-pill ghost">{{ current.id }}</span>
             </div>
             <div style="padding: 12px 14px">
-              <div v-if="!current" class="lp-empty">未选择素材</div>
+              <LpState v-if="!current" compact title="未选择素材" description="选中素材后这里显示来源、转码与字幕状态。" />
               <div v-else class="lp-kv">
                 <span class="k">原始文件名</span><span class="v">{{ current.originalName ?? '—' }}</span>
                 <span class="k">素材来源</span>
@@ -423,15 +506,27 @@ onMounted(async () => {
                   {{ current.builtin ? '不适用（本地素材）' : current.published ? '已发布' : '等待审核（playUrl 已可播）' }}
                 </span>
                 <span class="k">本地字幕</span>
+                <span class="v">{{ current.srtFileName ?? '未上传' }}</span>
+                <span class="k">核验用字幕</span>
                 <span class="v">
-                  {{ current.srtFileName ?? '未上传' }}
-                  <template v-if="localSubtitleInfo"> · {{ localSubtitleInfo.cueCount }} 条</template>
+                  <template v-if="effectiveSubtitle">
+                    {{ effectiveSubtitle.subtitleFile }} · {{ effectiveSubtitle.cueCount }} 条
+                  </template>
+                  <template v-else-if="localSubtitleError">读取失败</template>
+                  <template v-else>无可用字幕</template>
                 </span>
+                <span class="k">字幕来源</span>
+                <span class="v">{{ subtitleStateLabel }}</span>
                 <span class="k">创建时间</span><span class="v">{{ formatDateTime(current.createdAt) }}</span>
               </div>
 
               <div v-if="current && !materialReady && current.status === 'transcoding'" class="lp-note warn" style="margin-top: 10px">
                 保利威正在转码，通常 1 分钟内完成；转码完成前不能新增核验事项。
+              </div>
+
+              <div v-if="current && subtitleMissing" class="lp-note warn" style="margin-top: 10px">
+                该素材确实没有任何可用字幕（既没有上传 SRT，也没有系统映射）：
+                工作台与 AI 核验都拿不到字幕定位依据，请在上方上传 SRT 或创建云端智能字幕。
               </div>
 
               <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap">
@@ -485,13 +580,16 @@ onMounted(async () => {
             <div style="padding: 12px 14px; display: flex; flex-direction: column; gap: 10px">
               <div>
                 <div style="display: flex; align-items: center; gap: 6px">
-                  <span class="lp-pill" :class="current?.srtFileName ? 'mint' : 'ghost'">
-                    {{ current?.srtFileName ? '已有 SRT' : '无 SRT' }}
+                  <span class="lp-pill" :class="effectiveSubtitle ? 'mint' : 'ghost'">
+                    {{ subtitleStateLabel }}
                   </span>
                   <span style="font-size: 12.5px; font-weight: 600">本地 SRT 字幕</span>
                 </div>
                 <div style="font-size: 11.5px; color: var(--lp-muted); margin-top: 4px">
-                  使用本地 SRT 文件解析，不调用任何语音识别服务；本地字幕与云端字幕的时间戳都以视频时间为准。
+                  {{ subtitleSourceHint }}
+                </div>
+                <div style="font-size: 11.5px; color: var(--lp-muted); margin-top: 4px">
+                  本地字幕与云端字幕的时间戳都以视频时间为准，不调用语音识别服务。
                 </div>
               </div>
 

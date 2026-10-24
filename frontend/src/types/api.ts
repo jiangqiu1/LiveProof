@@ -24,7 +24,11 @@ export interface CaseListItem {
   startSec: number | null
   endSec: number | null
   reviewStatus: ReviewStatus
-  answerStatus: AnswerStatus
+  /**
+   * 回答状态。{@code null} 表示**尚未核验**（V8 起），与「核验过但视频里没找到回答」
+   * （{@code not_found}）是两件不同的事，界面上不能都显示成「未找到回答」。
+   */
+  answerStatus: AnswerStatus | null
   evidenceType: EvidenceType
   evidenceSufficiency: EvidenceSufficiency
   followUpRequired: boolean
@@ -96,9 +100,14 @@ export interface UnifiedCue extends SubtitleCue {
   source: SubtitleSource
 }
 
+/** 字幕来源：uploaded=素材页上传并登记；mapping=内置白名单映射；legacy=素材目录回退 */
+export type SubtitleFileSource = 'uploaded' | 'mapping' | 'legacy'
+
 export interface SubtitleResponse {
   video: string
   subtitleFile: string
+  /** 这份字幕是哪来的。「没上传」不等于「没有可用字幕」，展示时必须区分 */
+  source: SubtitleFileSource
   language?: string
   cueCount: number
   cues: SubtitleCue[]
@@ -127,8 +136,18 @@ export interface Material {
   sizeBytes: number | null
   width: number | null
   height: number | null
+  /** 仅表示「用户为该素材上传过 SRT」的登记值；内置示例素材为 null 但可能有映射字幕 */
   srtFileName: string | null
+  /**
+   * 该素材当前能否解析到字幕（后端按三级顺序判断的结果）。
+   *
+   * <p>不要用 `srtFileName != null` 代替：内置示例素材登记值为 null，
+   * 靠静态白名单映射到配套 SRT，实际有字幕。
+   */
+  subtitleAvailable: boolean
   createdAt: string | null
+  /** 素材最后变更时间（转码状态、字幕登记都会刷新），不代表真正编辑过 */
+  updatedAt: string | null
 }
 
 export interface MaterialCapabilities {
@@ -346,6 +365,69 @@ export interface AiAdoptPayload {
   reasoning?: string
   limitations?: string
   timePoints?: number[]
+}
+
+/* ---------- AI 候选核验事项（从字幕提取，不是核验结论） ---------- */
+
+/**
+ * 用哪份字幕提取候选。
+ *
+ * <p>{@code auto} 是默认值：先本地 SRT，没有再用已就绪的云端字幕；
+ * 两者都没有才报「无可用字幕」。之所以不是单一来源，是因为用户通常不知道
+ * 这个素材到底准备了哪一份字幕，让他先去看素材页反而多一步。
+ */
+export type CandidateSubtitleSource = 'auto' | 'local' | 'cloud'
+
+/**
+ * 一条候选事项。
+ *
+ * <p>刻意不含任何核验字段：AI 只负责「想出有哪些承诺值得核验」，
+ * 是否被证明仍由人工回到工作台判断。
+ */
+export interface AiCaseCandidate {
+  id: string
+  question: string
+  claim: string
+  startSec: number | null
+  endSec: number | null
+  /** 该区间的字幕原文；服务端会用真实字幕校正模型改写的引用 */
+  quote: string | null
+  cueIndexes: number[]
+  /** 疑似重复：库内已有同问题，或本批前面已出现 */
+  duplicate: boolean
+  duplicateOf: string | null
+  duplicateOfIndex: number | null
+}
+
+export interface AiCandidateResponse {
+  materialId: string
+  subtitleSource: 'local' | 'cloud'
+  subtitleFile: string | null
+  totalCues: number
+  cuesUsed: number
+  truncated: boolean
+  model: string
+  elapsedMs: number
+  candidates: AiCaseCandidate[]
+  duplicateCount: number
+  notes: string[]
+}
+
+/** 确认入库时提交的单条。只带问题、承诺与时间区间。 */
+export interface CaseCandidateItem {
+  question: string
+  claim: string
+  startSec: number | null
+  endSec: number | null
+}
+
+export interface CaseCandidateBatchResult {
+  materialId: string
+  requested: number
+  createdCount: number
+  /** 写入后的事项，来源恒为 ai、核验进度恒为尚未核验 */
+  created: CaseDetail[]
+  source: string
 }
 
 /* ---------- 复盘报告 ---------- */

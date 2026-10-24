@@ -22,10 +22,28 @@
   --lp-warn-weak: #fff6e9;
   --lp-warn-text: #a4641a;
   --lp-danger: #e2685f;
+  /* 圆角刻度（全局只用这五档 + 999 胶囊）：
+     14 大横幅 / 12 --lp-radius 卡片 / 10 --lp-radius-md 面板内件 /
+     8 --lp-radius-sm 控件 / 6 --lp-radius-xs 微件 */
   --lp-radius: 12px;
+  --lp-radius-md: 10px;
   --lp-radius-sm: 8px;
+  --lp-radius-xs: 6px;
   --lp-shadow: 0 1px 2px rgba(8, 26, 38, 0.04);
   --lp-shadow-hover: 0 6px 18px rgba(8, 26, 38, 0.07);
+
+  /* 填充色阶：从页面背景到最深填充，hover / 骨架 / 图标底统一从这里取 */
+  --lp-fill: var(--lp-fill);
+  --lp-fill-soft: var(--lp-fill-soft);
+  --lp-fill-strong: var(--lp-fill-strong);
+  --lp-border-hover: var(--lp-border-hover);
+
+  /* 动效三档：微交互（按钮、色变）/ 默认（宽度、位移）/ 入场（页面、卡片）。
+     缓动统一用一条先快后缓的曲线，不用线性与弹跳。 */
+  --lp-ease: cubic-bezier(0.33, 0, 0.2, 1);
+  --lp-dur-1: 0.14s;
+  --lp-dur-2: 0.2s;
+  --lp-dur-3: 0.28s;
 
   /* Element Plus 主题对齐 */
   --el-color-primary: #00bf95;
@@ -36,7 +54,7 @@
   --el-color-primary-light-9: #e9fcf6;
   --el-color-primary-dark-2: #009c79;
   --el-border-color: #e5ece9;
-  --el-border-color-light: #eef3f1;
+  --el-border-color-light: var(--lp-fill-strong);
   --el-text-color-primary: #081a26;
   --el-text-color-regular: #24343d;
   --el-text-color-secondary: #71817c;
@@ -109,22 +127,87 @@ a {
   flex-direction: column;
   padding: 18px 12px 14px;
   gap: 18px;
+  /* 收起要能改变自身宽度，width/flex-basis/padding 三者必须一起过渡，否则会跳一下 */
+  position: relative;
+  transition: width var(--lp-dur-2) var(--lp-ease), flex-basis var(--lp-dur-2) var(--lp-ease), padding var(--lp-dur-2) var(--lp-ease);
+}
+
+/* 收起态：只留图标栏。68 = 图标 18 + 左右 padding 8×2 + 余量，导航项宽 52px 刚好容纳 */
+.lp-sidebar.is-collapsed {
+  width: 68px;
+  flex: 0 0 68px;
+  padding: 18px 8px 14px;
+}
+.lp-sidebar.is-collapsed .lp-brand {
+  padding: 0;
+  align-items: center;
+}
+/* 收起态换成预乘 alpha 的方形图形标：留白与尺寸在生成位图时已定好，
+   浏览器只做等比缩放，不会像 object-fit 裁切那样在边缘带出黑像素 */
+.lp-sidebar.is-collapsed .lp-brand .lp-logo-full {
+  display: none;
+}
+.lp-sidebar.is-collapsed .lp-nav-item {
+  justify-content: center;
+  gap: 0;
+  padding: 9px 0;
+}
+.lp-sidebar.is-collapsed .lp-nav-label {
+  display: none;
+}
+
+/* 折叠开关：跨在侧栏右缘的圆形小钮，展开/收起都在同一位置，不占导航空间 */
+.lp-collapse {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translate(50%, -50%);
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--lp-border);
+  border-radius: 50%;
+  background: var(--lp-surface);
+  color: var(--lp-muted);
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(8, 26, 38, 0.08);
+  transition: color var(--lp-dur-1) var(--lp-ease), border-color var(--lp-dur-1) var(--lp-ease);
+}
+.lp-collapse:hover {
+  color: var(--lp-mint-text);
+  border-color: var(--lp-mint);
 }
 
 .lp-brand {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 2px 6px 0;
+  padding: 0 6px 0;
   min-width: 0;
 }
+/* 完整 Logo：50px 高（44 → 50，2026-10-24 第五轮放大一档）。原始图 2172×724 ≈ 3:1，
+   等比后宽 150px，侧栏可用宽 180px（216 − 左右 padding 12×2 − brand padding 6×2），不溢出。
+   width:auto + object-fit:contain 保持原始比例，不做任何裁切。 */
 .lp-brand img {
-  height: 34px;
+  height: 50px;
   width: auto;
   max-width: 100%;
   object-fit: contain;
   object-position: left center;
   align-self: flex-start;
+}
+/* 收起态的方形图形标只在该状态出现，展开态整张 Logo 已经带图形，无需重复 */
+.lp-brand .lp-logo-mark {
+  display: none;
+}
+.lp-sidebar.is-collapsed .lp-brand .lp-logo-mark {
+  display: block;
+  height: 40px;
+  width: 40px;
+  align-self: center;
 }
 
 .lp-nav {
@@ -145,15 +228,15 @@ a {
   cursor: pointer;
   width: 100%;
   text-align: left;
-  transition: background 0.16s ease, color 0.16s ease;
+  transition: background var(--lp-dur-1) var(--lp-ease), color var(--lp-dur-1) var(--lp-ease);
 }
 .lp-nav-item svg {
   flex: 0 0 18px;
   color: var(--lp-muted);
-  transition: color 0.16s ease;
+  transition: color var(--lp-dur-1) var(--lp-ease);
 }
 .lp-nav-item:hover {
-  background: #f4f8f7;
+  background: var(--lp-fill);
   color: var(--lp-ink);
 }
 .lp-nav-item.is-active {
@@ -165,27 +248,6 @@ a {
   color: var(--lp-mint-text);
 }
 
-.lp-sidebar-foot {
-  margin-top: auto;
-  border: 1px solid var(--lp-border);
-  border-radius: 10px;
-  padding: 10px 11px;
-  background: #fbfdfc;
-}
-.lp-sidebar-foot .t {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--lp-ink);
-}
-.lp-sidebar-foot .d {
-  margin-top: 2px;
-  font-size: 11.5px;
-  color: var(--lp-muted);
-  line-height: 1.5;
-}
 .lp-dot {
   width: 6px;
   height: 6px;
@@ -229,7 +291,7 @@ a {
   margin-bottom: 2px;
 }
 .lp-crumb span.sep {
-  color: #cfd9d6;
+  color: var(--lp-border-strong);
 }
 .lp-page-title {
   margin: 0;
@@ -266,12 +328,12 @@ a {
   font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+  transition: background var(--lp-dur-1) var(--lp-ease), border-color var(--lp-dur-1) var(--lp-ease), box-shadow var(--lp-dur-1) var(--lp-ease);
   white-space: nowrap;
 }
 .lp-btn:hover:not(:disabled) {
-  border-color: #bfd0ca;
-  background: #fbfdfc;
+  border-color: var(--lp-border-hover);
+  background: var(--lp-fill-soft);
 }
 .lp-btn:disabled {
   opacity: 0.55;
@@ -328,18 +390,47 @@ a {
 }
 
 /* ---------- 三栏 ---------- */
+/* 列宽三档：默认（<1366）→ ≥1366 → ≥1440，min-width 串行覆盖，互不重叠。
+   中栏用 minmax(0, 1fr) 而非 minmax(360px, 1fr)：把最小宽度约束从 360px 解耦，
+   由中栏吸收剩余空间，避免两侧栏加宽后与中栏最小宽度之和超过视口造成横向溢出。 */
 .lp-workbench {
   display: grid;
-  grid-template-columns: 296px minmax(360px, 1fr) 324px;
+  grid-template-columns: 260px minmax(0, 1fr) 320px;
   grid-template-rows: minmax(0, 1fr);
   gap: 14px;
   flex: 1 1 auto;
   min-height: 0;
 }
+@media (min-width: 1366px) {
+  .lp-workbench {
+    grid-template-columns: 272px minmax(0, 1fr) 336px;
+  }
+}
+@media (min-width: 1440px) {
+  .lp-workbench {
+    grid-template-columns: 284px minmax(0, 1fr) 360px;
+  }
+}
 /* 让三栏都被限制在一屏内，卡片内部各自滚动 */
 .lp-workbench > * {
   min-height: 0;
   height: 100%;
+}
+
+/* ---------- 工作台中栏纵向预算 ----------
+   问题：中栏是「视频卡（定高）+ 字幕卡（吃剩余）」的纵向 flex。视口一矮，字幕卡被挤到
+   只剩一条的空间；实测 1707×842 时字幕可视区仅 141px，只容 3 条完整字幕。
+   做法：只压中栏自己的三处留白（卡头 12→8、视频上留白 12→8、视频提示行 7/9→4/5），
+   不动字号、不隐藏任何控件、不裁画面。用 .lp-workbench 作用域把影响面锁在工作台，
+   侧栏、右栏与其他页面的 .lp-card-head 保持原样（.lp-card-head 被 10 个文件共用）。 */
+.lp-workbench .lp-card-head {
+  padding: 8px 14px;
+}
+.lp-workbench .lp-video-wrap {
+  padding: 8px 14px 0;
+}
+.lp-workbench .lp-video-hint {
+  padding: 4px 2px 5px;
 }
 
 /* ---------- 状态胶囊 ---------- */
@@ -356,9 +447,9 @@ a {
   white-space: nowrap;
 }
 .lp-pill.neutral {
-  background: #f3f6f5;
+  background: var(--lp-fill-strong);
   color: var(--lp-muted);
-  border-color: #e9efec;
+  border-color: var(--lp-border);
 }
 .lp-pill.mint {
   background: var(--lp-mint-weak);
@@ -392,20 +483,20 @@ a {
   min-width: 62px;
   height: 30px;
   padding: 0 9px;
-  border-radius: 7px;
+  border-radius: 6px;
   border: 1px solid var(--lp-border-strong);
   background: #fff;
   color: var(--lp-ink-soft);
   font-size: 12px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--lp-dur-1) var(--lp-ease);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .lp-seg:hover:not(:disabled):not(.is-active) {
-  border-color: #bfd0ca;
-  background: #fbfdfc;
+  border-color: var(--lp-border-hover);
+  background: var(--lp-fill-soft);
 }
 .lp-seg.is-active {
   border-color: var(--lp-mint);
@@ -476,13 +567,13 @@ a {
   display: flex;
   gap: 9px;
   padding: 10px 11px;
-  border-radius: 9px;
+  border-radius: 8px;
   border: 1px solid transparent;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background var(--lp-dur-1) var(--lp-ease), border-color var(--lp-dur-1) var(--lp-ease);
 }
 .lp-case-item:hover {
-  background: #f7faf9;
+  background: var(--lp-bg);
   border-color: var(--lp-border);
 }
 .lp-case-item.is-active {
@@ -493,7 +584,7 @@ a {
   flex: 0 0 20px;
   height: 20px;
   border-radius: 50%;
-  background: #f0f4f3;
+  background: var(--lp-fill-strong);
   color: var(--lp-muted);
   font-size: 11px;
   display: flex;
@@ -544,11 +635,28 @@ a {
 }
 .lp-video {
   width: 100%;
+  /* 高度上限 46vh：用 max-width 按 16:9 反算等效高度，而不是直接压 max-height。
+     直接给 max-height 时 width:100% 已固定，高度被裁会导致 aspect-ratio 失效、
+     画面在容器内出现黑边；改为限宽后高度自动 ≤46vh，宽高比严格不变、不裁切画面。
+     矮视口（高度 ≤900px）另有一条更紧的上限，见下方「矮视口纵向预算」。 */
+  max-width: calc(46vh * 16 / 9);
   aspect-ratio: 16 / 9;
-  border-radius: 9px;
+  margin-inline: auto;
+  border-radius: 8px;
   background: #08131a;
   display: block;
   outline: none;
+}
+/* 矮视口再加一道更紧的视频高度上限。46vh 只在 ≥1080 高度才真正生效；842/900 这类常见
+   笔记本高度下中栏宽度才是限制项（实测 42vh 起才压得住本行宽度），故按高度断点收紧至
+   38vh。仍走 max-width 反算，16:9 恒定、不裁切；1920×1080 不受影响（仍是 883.2×496.8）。
+   用 .lp-workbench 限定作用域：VideoPlayer 也被 MediaView 复用，不加作用域会把素材库
+   页的视频一起压小（实测 1440×900 下 cap 由 736px 变 608px），属非预期外溢。
+   双类名选择器优先级高于 .lp-video 单类，因此不受下方规则书写顺序影响。 */
+@media (max-height: 900px) {
+  .lp-workbench .lp-video {
+    max-width: calc(38vh * 16 / 9);
+  }
 }
 .lp-video-hint {
   display: flex;
@@ -565,13 +673,13 @@ a {
   display: flex;
   gap: 10px;
   padding: 7px 10px;
-  border-radius: 7px;
+  border-radius: 6px;
   cursor: pointer;
   border: 1px solid transparent;
-  transition: background 0.13s ease;
+  transition: background var(--lp-dur-1) var(--lp-ease);
 }
 .lp-cue:hover {
-  background: #f7faf9;
+  background: var(--lp-bg);
 }
 .lp-cue.is-current {
   background: var(--lp-mint-weak);
@@ -597,23 +705,75 @@ a {
 }
 
 /* ---------- 右栏 ---------- */
+/* 右栏分三层，各自独立处理纵向空间：
+     .lp-review-ai   AI 建议区：flex 子项 + max-height 限高（展开且有结果时内部滚动）
+     .lp-review-main 人工核验区：唯一的主滚动区
+     .lp-review-foot 底部保存区：flex: 0 0 auto，不滚动、常驻卡片底部
+   外层 .lp-review 自身不滚动（overflow: hidden），把滚动交给上面前两层。
+   底栏靠 flex 分配空间而非 position: sticky，因此不会覆盖内容尾部——
+   sticky 只是视觉上浮在上面，内容仍会滚到它下面被遮住，这是本方案刻意避开的。 */
 .lp-review {
-  padding: 12px 14px 14px;
-  gap: 12px;
+  padding: 12px 14px 0;
+  gap: 10px;
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
+}
+.lp-review-ai {
+  /* flex: 0 0 auto 很关键：AI 区按自身内容取高，只受 max-height 约束。
+     若写成 flex: 0 1 auto，空间紧张时它会被优先压扁——实测 900 高视口下自然高度
+     约 117px 却被压到 97px，内部开始出现无意义滚动条。 */
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: min(40%, 360px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.lp-review-ai > .lp-ai {
+  /* 限高由父级给出，这里只负责把「头部固定、内容滚动」传导下去 */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+.lp-review-main {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 2px 10px 0;
   scrollbar-width: thin;
   scrollbar-color: #d9e3df transparent;
 }
-.lp-review::-webkit-scrollbar {
+.lp-review-main::-webkit-scrollbar {
   width: 6px;
 }
-.lp-review::-webkit-scrollbar-thumb {
+.lp-review-main::-webkit-scrollbar-thumb {
   background: #d9e3df;
   border-radius: 3px;
+}
+.lp-review-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  /* 360px 下标题与说明可能挤在一行，允许折行而不是截断 */
+  flex-wrap: wrap;
+  padding-bottom: 1px;
+}
+.lp-review-section-head .k {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lp-ink);
+}
+.lp-review-section-head .hint {
+  font-size: 10.5px;
+  color: var(--lp-muted-soft);
+  line-height: 1.45;
 }
 .lp-review-question {
   font-size: 13px;
@@ -629,6 +789,44 @@ a {
   color: var(--lp-muted);
   margin-top: 4px;
 }
+.lp-review-claim {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--lp-muted);
+}
+.lp-review-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--lp-muted-soft);
+}
+.lp-review-hint.warn {
+  color: var(--lp-warn-text);
+}
+
+/* 四字段分组：收紧组内间距，不靠缩字号换行。
+   分段按钮只在这个组内压缩内边距与字号（.lp-seg 也被字幕面板复用，
+   不加作用域会把字幕来源的三段按钮一起改小）。 */
+.lp-field-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.lp-field-grid .lp-field {
+  gap: 5px;
+}
+.lp-field-grid .lp-segmented {
+  gap: 3px;
+}
+.lp-field-grid .lp-seg {
+  min-width: 0;
+  height: 28px;
+  /* 360px 与 320px 两档右栏下，「证据类型」4 个选项要挤在一行：
+     靠压内边距（9px→5px）与组内间距（6px→3px）腾出约 15px，
+     字号维持 11.5px 不降——缩字到 10.5 以下可读性明显变差，不作为换行手段。 */
+  padding: 0 5px;
+  font-size: 11.5px;
+}
 .lp-chip-row {
   display: flex;
   flex-wrap: wrap;
@@ -642,7 +840,7 @@ a {
   padding: 0 8px;
   border-radius: 6px;
   border: 1px solid var(--lp-border-strong);
-  background: #fbfdfc;
+  background: var(--lp-fill-soft);
   font-size: 11.5px;
   color: var(--lp-ink-soft);
   cursor: pointer;
@@ -668,13 +866,39 @@ a {
   color: var(--lp-danger);
 }
 
+/* 底部保存区：不滚动、贴住卡片底边。上边框把「内容区」和「操作区」在视觉上分开，
+   底部留 12px 与卡片圆角呼应；不写 position: sticky，避免浮层遮住滚动内容尾部。 */
+.lp-review-foot {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--lp-border);
+  padding: 10px 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--lp-surface);
+}
 .lp-foot-actions {
   display: flex;
   gap: 8px;
-  padding-top: 2px;
 }
 .lp-foot-actions .lp-btn {
   flex: 1 1 0;
+}
+.lp-foot-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--lp-muted-soft);
+}
+.lp-foot-meta .is-dirty {
+  color: var(--lp-warn-text);
+  font-weight: 500;
+}
+.lp-foot-meta .ts {
+  margin-left: auto;
+  text-align: right;
 }
 
 /* ---------- 表格 / 通用页 ---------- */
@@ -735,8 +959,8 @@ a {
 
 .lp-note {
   border: 1px solid var(--lp-border);
-  background: #fbfdfc;
-  border-radius: 9px;
+  background: var(--lp-fill-soft);
+  border-radius: 8px;
   padding: 10px 12px;
   font-size: 12px;
   color: var(--lp-muted);
@@ -777,9 +1001,9 @@ a {
 }
 .el-table {
   --el-table-border-color: var(--lp-border);
-  --el-table-header-bg-color: #f7faf9;
+  --el-table-header-bg-color: var(--lp-bg);
   --el-table-header-text-color: var(--lp-muted);
-  --el-table-row-hover-bg-color: #f7faf9;
+  --el-table-row-hover-bg-color: var(--lp-bg);
   font-size: 12.5px;
 }
 .el-table th.el-table__cell {
@@ -807,11 +1031,19 @@ a {
   flex-direction: column;
   gap: 8px;
 }
+/* 折叠后只保留标题行与必要提示，不再占满右栏 */
+.lp-ai.is-collapsed {
+  gap: 6px;
+  padding-bottom: 10px;
+}
 .lp-ai-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  /* 折叠按钮与标题必须常驻可见：AI 区被 max-height 限高后，
+     内容层滚动而头部不能被压缩或滚走。 */
+  flex: 0 0 auto;
 }
 .lp-ai-title {
   display: flex;
@@ -820,6 +1052,75 @@ a {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--lp-ink);
+  min-width: 0;
+}
+/* 折叠箭头：纯图形按钮，无边框底色，命中区 18×18 保证可点 */
+.lp-ai-toggle {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--lp-muted);
+  cursor: pointer;
+}
+.lp-ai-toggle:hover {
+  background: var(--lp-mint-weak);
+  color: var(--lp-mint-text);
+}
+.lp-ai-toggle:focus-visible {
+  outline: 2px solid var(--lp-mint);
+  outline-offset: 1px;
+}
+.lp-ai-chev {
+  transition: transform var(--lp-dur-1) var(--lp-ease);
+  transform: rotate(0deg);
+}
+.lp-ai-chev.is-open {
+  transform: rotate(90deg);
+}
+/* 折叠态的结果提示：告诉用户「结果还在」，附展开入口 */
+.lp-ai-folded {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--lp-muted);
+  background: #fff;
+  border: 1px dashed var(--lp-border-strong);
+  border-radius: 6px;
+  padding: 4px 6px 4px 9px;
+  line-height: 1.5;
+}
+.lp-ai-fold {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  /* AI 结果可能远超 .lp-review-ai 的 max-height（实测超长结果可达 8000px+），
+     而外层两层都是 overflow: hidden。若不在这里开放滚动，超出部分会被
+     直接裁掉且没有任何滚动条——用户既看不到也滚不到。
+     故由本层承担「头部固定 + 内容滚动」内的滚动职责。 */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: #d9e3df transparent;
+}
+.lp-ai-fold::-webkit-scrollbar {
+  width: 6px;
+}
+.lp-ai-fold::-webkit-scrollbar-thumb {
+  background: #d9e3df;
+  border-radius: 3px;
 }
 .lp-ai-mark {
   display: inline-flex;
@@ -827,7 +1128,7 @@ a {
   justify-content: center;
   width: 22px;
   height: 18px;
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--lp-ink);
   color: #fff;
   font-size: 10.5px;
@@ -842,6 +1143,79 @@ a {
 .lp-ai-meta {
   font-size: 11px;
   color: var(--lp-muted-soft);
+}
+/* 标题后的问号：说明与模型信息从展开区收进浮层，问号本身只占 15px */
+.lp-ai-help {
+  position: relative;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--lp-border-strong);
+  border-radius: 50%;
+  background: #fff;
+  color: var(--lp-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color var(--lp-dur-1) var(--lp-ease), background var(--lp-dur-1) var(--lp-ease), color var(--lp-dur-1) var(--lp-ease);
+}
+/* 视觉 15px，命中区扩到 25px：图标太小，指针稍一偏就滑出，
+   hover 打开的浮层会跟着闪，扩大透明命中区能把抖动消掉 */
+.lp-ai-help::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+}
+.lp-ai-help:hover,
+.lp-ai-help[aria-expanded='true'] {
+  border-color: var(--lp-mint);
+  background: var(--lp-mint-weak);
+  color: var(--lp-mint-text);
+}
+.lp-ai-help:focus-visible {
+  outline: 2px solid var(--lp-mint);
+  outline-offset: 3px;
+}
+/* 说明浮层：teleport 到 body，故不能依赖 .lp-ai 内的字体继承 */
+.lp-ai-tip {
+  position: fixed;
+  z-index: 3000;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--lp-border);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 26px rgba(8, 26, 38, 0.13);
+  font-size: 12px;
+  color: var(--lp-ink-soft);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+/* 指向问号的箭头：浮层被右缘挤到按钮左侧，没有它关联感会弱 */
+.lp-ai-tip::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: var(--lp-tip-arrow-x, 12px);
+  width: 9px;
+  height: 9px;
+  background: #fff;
+  border-top: 1px solid var(--lp-border);
+  border-left: 1px solid var(--lp-border);
+  transform: rotate(45deg);
+}
+.lp-ai-tip .lp-ai-meta {
+  padding-top: 7px;
+  border-top: 1px dashed var(--lp-border);
+  line-height: 1.7;
 }
 .lp-ai-loading {
   display: flex;
@@ -976,7 +1350,7 @@ a {
   font-size: 10.5px;
   color: var(--lp-muted-soft);
   padding: 3px 6px;
-  background: #fbfdfc;
+  background: var(--lp-fill-soft);
 }
 .lp-ai-list {
   margin: 0;
@@ -989,7 +1363,7 @@ a {
   font-size: 11px;
   color: var(--lp-warn-text);
   background: var(--lp-warn-weak);
-  border-radius: 7px;
+  border-radius: 6px;
   padding: 6px 8px;
   line-height: 1.55;
 }
@@ -1032,7 +1406,7 @@ a {
   margin: 0;
   max-height: 56vh;
   overflow: auto;
-  background: #fbfdfc;
+  background: var(--lp-fill-soft);
   border: 1px solid var(--lp-border);
   border-radius: 10px;
   padding: 12px 14px;
@@ -1056,11 +1430,11 @@ a {
 .lp-upload-zone {
   border: 1px dashed var(--lp-border-strong);
   border-radius: var(--lp-radius);
-  background: #fbfdfc;
+  background: var(--lp-fill-soft);
   padding: 18px 16px;
   text-align: center;
   cursor: pointer;
-  transition: border-color 0.16s, background 0.16s;
+  transition: border-color var(--lp-dur-1) var(--lp-ease), background var(--lp-dur-1) var(--lp-ease);
 }
 .lp-upload-zone:hover:not(.is-busy) {
   border-color: var(--lp-mint);
@@ -1096,7 +1470,7 @@ a {
 .lp-progress-bar {
   height: 100%;
   background: var(--lp-mint);
-  transition: width 0.2s ease;
+  transition: width var(--lp-dur-2) var(--lp-ease);
 }
 
 /* ---------- 素材列表 ---------- */
@@ -1109,7 +1483,7 @@ a {
   border-radius: var(--lp-radius-sm);
   background: #fff;
   cursor: pointer;
-  transition: border-color 0.16s, box-shadow 0.16s;
+  transition: border-color var(--lp-dur-1) var(--lp-ease), box-shadow var(--lp-dur-1) var(--lp-ease);
 }
 .lp-material-item:hover {
   border-color: var(--lp-border-strong);
@@ -1157,7 +1531,7 @@ a {
   border-radius: var(--lp-radius-sm);
   padding: 11px 13px;
   cursor: pointer;
-  transition: border-color 0.16s, background 0.16s;
+  transition: border-color var(--lp-dur-1) var(--lp-ease), background var(--lp-dur-1) var(--lp-ease);
 }
 .lp-radio-card:hover {
   border-color: var(--lp-border-strong);
@@ -1195,7 +1569,7 @@ a {
   border-radius: var(--lp-radius);
   padding: 16px 18px;
   cursor: pointer;
-  transition: border-color 0.16s, box-shadow 0.16s, transform 0.16s;
+  transition: border-color var(--lp-dur-1) var(--lp-ease), box-shadow var(--lp-dur-1) var(--lp-ease), transform var(--lp-dur-1) var(--lp-ease);
 }
 .lp-entry-card:hover {
   border-color: var(--lp-mint);
@@ -1217,4 +1591,534 @@ a {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+/* ============================================================
+   首页（/）—— 入口层
+   职责：继续上次核验 / 新建项目 / 进示例，不做任何核验操作。
+   ============================================================ */
+.lp-home {
+  overflow-y: auto;
+}
+
+/* ---------- Hero ---------- */
+.lp-home-hero {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  padding: 30px 34px;
+  border-radius: 14px;
+  border: 1px solid #dff2ea;
+  background: linear-gradient(116deg, #f1fbf7 0%, #f8fcfb 52%, var(--lp-bg) 100%);
+}
+.lp-home-hero-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.lp-home-kicker {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.15em;
+  color: var(--lp-mint-text);
+}
+.lp-home-title {
+  margin: 10px 0 0;
+  font-size: 31px;
+  line-height: 1.32;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--lp-ink);
+}
+.lp-home-sub {
+  margin: 10px 0 0;
+  max-width: 440px;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--lp-muted);
+}
+.lp-home-actions {
+  margin-top: 20px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.lp-home-actions .lp-btn {
+  height: 36px;
+  padding: 0 18px;
+  font-size: 13px;
+}
+
+/* 右侧示意：仅表达「视频 → 逐条核验」，不承载真实数据 */
+.lp-home-art {
+  position: relative;
+  flex: 0 0 344px;
+  padding: 6px 10px 10px 0;
+}
+.lp-home-frame {
+  border-radius: 12px;
+  background: var(--lp-ink);
+  padding: 0 0 8px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(8, 26, 38, 0.14);
+}
+.lp-home-screen {
+  aspect-ratio: 16 / 9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lp-home-bar {
+  margin: 0 12px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.16);
+  overflow: hidden;
+}
+.lp-home-bar span {
+  display: block;
+  width: 44%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--lp-mint);
+}
+.lp-home-checks {
+  position: absolute;
+  top: -6px;
+  right: 0;
+  width: 146px;
+  padding: 9px 11px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--lp-border);
+  background: var(--lp-surface);
+  box-shadow: 0 6px 18px rgba(8, 26, 38, 0.1);
+}
+.lp-home-checks-head {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--lp-mint-text);
+  letter-spacing: 0.02em;
+}
+.lp-home-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+.lp-home-check i {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--lp-border-strong);
+}
+.lp-home-check i.on {
+  border-color: transparent;
+  background: var(--lp-mint);
+}
+.lp-home-check span {
+  height: 5px;
+  flex: 1 1 auto;
+  border-radius: 3px;
+  background: var(--lp-fill-strong);
+}
+.lp-home-check span.short {
+  flex: 0 0 58%;
+}
+
+/* ---------- 继续核验 ---------- */
+.lp-home-section {
+  flex: 0 0 auto;
+}
+.lp-home-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.lp-home-section-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--lp-ink);
+}
+.lp-home-more {
+  font-size: 12px;
+  color: var(--lp-mint-text);
+  text-decoration: none;
+}
+.lp-home-more:hover {
+  text-decoration: underline;
+}
+
+.lp-home-card {
+  padding: 16px 18px;
+  border-radius: var(--lp-radius);
+  border: 1px solid var(--lp-border);
+  background: var(--lp-surface);
+}
+.lp-home-card .t {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--lp-ink);
+}
+.lp-home-card .d {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--lp-muted);
+  max-width: 620px;
+}
+
+.lp-home-project {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  border-radius: var(--lp-radius);
+  border: 1px solid var(--lp-border);
+  background: var(--lp-surface);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--lp-dur-1) var(--lp-ease), box-shadow var(--lp-dur-1) var(--lp-ease), transform var(--lp-dur-1) var(--lp-ease);
+}
+.lp-home-project:hover {
+  border-color: var(--lp-mint);
+  box-shadow: var(--lp-shadow-hover);
+  transform: translateY(-1px);
+}
+.lp-home-thumb {
+  position: relative;
+  flex: 0 0 132px;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  background: #0c2734;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lp-home-thumb-dur {
+  position: absolute;
+  right: 5px;
+  bottom: 4px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 15px;
+  color: #ffffff;
+  background: rgba(8, 26, 38, 0.62);
+}
+.lp-home-project-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.lp-home-project-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--lp-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lp-home-project-meta {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--lp-muted);
+}
+.lp-home-project-meta .dot {
+  color: var(--lp-border-strong);
+}
+.lp-home-project-tags {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.lp-home-project-time {
+  flex: 0 0 96px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  text-align: right;
+}
+.lp-home-project-time .k {
+  font-size: 11px;
+  color: var(--lp-muted);
+}
+.lp-home-project-time .v {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--lp-ink);
+}
+.lp-home-project-arrow {
+  flex: 0 0 auto;
+  font-size: 14px;
+  color: var(--lp-muted-soft);
+}
+
+.lp-home-others {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--lp-muted);
+}
+.lp-home-others a {
+  color: var(--lp-mint-text);
+  text-decoration: none;
+}
+.lp-home-others a:hover {
+  text-decoration: underline;
+}
+
+/* ============================================================
+   统一状态占位（LpState）与骨架屏（LpSkeletonList）
+   空态 / 错误态 / 搜索无结果共用一套布局，只换图标与语义；
+   骨架只在首屏加载时使用，刷新已有内容不闪骨架。
+   ============================================================ */
+.lp-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 44px 20px;
+  text-align: center;
+}
+.lp-state.is-compact {
+  padding: 26px 14px;
+  gap: 9px;
+}
+.lp-state-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--lp-fill-strong);
+  color: var(--lp-muted);
+}
+.lp-state-icon svg {
+  width: 26px;
+  height: 26px;
+}
+.lp-state.is-compact .lp-state-icon {
+  width: 38px;
+  height: 38px;
+}
+.lp-state.is-compact .lp-state-icon svg {
+  width: 19px;
+  height: 19px;
+}
+.lp-state.is-error .lp-state-icon {
+  background: #fdf3ec;
+  color: #b07a3f;
+}
+.lp-state-body {
+  max-width: 380px;
+}
+.lp-state.is-compact .lp-state-body {
+  max-width: 280px;
+}
+.lp-state-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--lp-ink);
+}
+.lp-state.is-compact .lp-state-title {
+  font-size: 12.5px;
+}
+.lp-state-desc {
+  margin-top: 5px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--lp-muted);
+}
+.lp-state.is-compact .lp-state-desc {
+  font-size: 11.5px;
+}
+.lp-state-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+.lp-state.is-compact .lp-state-actions {
+  margin-top: 8px;
+}
+.lp-state-actions .lp-btn {
+  height: 30px;
+  padding: 0 14px;
+  font-size: 12px;
+}
+
+/* ---------- 骨架屏 ---------- */
+.lp-skel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
+}
+.lp-skel-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+}
+.lp-skel-dot,
+.lp-skel-line {
+  display: block;
+  border-radius: 6px;
+  background: var(--lp-fill-strong);
+  position: relative;
+  overflow: hidden;
+}
+.lp-skel-dot::after,
+.lp-skel-line::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.65), transparent);
+  animation: lp-skel-shimmer 1.4s infinite;
+}
+.lp-skel-dot {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: 8px;
+}
+.lp-skel-lines {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lp-skel-line {
+  height: 9px;
+}
+.lp-skel-line.is-main {
+  width: 72%;
+}
+.lp-skel-line.is-sub {
+  height: 7px;
+}
+@keyframes lp-skel-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+
+
+/* ============================================================
+   动效体系（第十轮）：统一时长 / 缓动 / 入场 / 反馈
+   原则：只动透明度与 4~10px 的位移，时长 <=0.3s，无弹跳无缩放夸张；
+   列表数据刷新不重播动画（key 稳定的 DOM 不重新触发 animation）。
+   ============================================================ */
+
+/* ---------- 页面过渡（App.vue 的 RouterView） ---------- */
+/* enter 用三档最慢一档 + 6px 上移；leave 只做淡出且更快——离开要干脆，
+   进入才配得上过渡。mode="out-in" 保证两屏不重叠。 */
+.lp-page-enter-active {
+  transition: opacity var(--lp-dur-3) var(--lp-ease), transform var(--lp-dur-3) var(--lp-ease);
+}
+.lp-page-leave-active {
+  transition: opacity var(--lp-dur-1) var(--lp-ease);
+}
+.lp-page-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.lp-page-leave-to {
+  opacity: 0;
+}
+
+/* ---------- 首屏入场（主页区块 / 工作台三栏） ---------- */
+/* 只在元素首次插入 DOM 时播放一次；lp-d1~lp-d4 是 40ms 步进的延迟阶梯 */
+@keyframes lp-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.lp-rise {
+  animation: lp-rise var(--lp-dur-3) var(--lp-ease) backwards;
+}
+.lp-d1 { animation-delay: 40ms; }
+.lp-d2 { animation-delay: 80ms; }
+.lp-d3 { animation-delay: 120ms; }
+.lp-d4 { animation-delay: 160ms; }
+
+/* ---------- 内容淡入（骨架 / 空态切换到真实内容） ---------- */
+/* 不带位移：骨架与内容布局相近，只有透明度差，位移反而显得晃 */
+@keyframes lp-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.lp-state,
+.lp-skel-list,
+.lp-case-item,
+.lp-material-item {
+  animation: lp-fade-in var(--lp-dur-2) var(--lp-ease);
+}
+
+/* ---------- 按钮反馈 ---------- */
+/* 按下：1px 下沉，力度克制到刚好可感知；primary 悬停补一层薄薄荷投影 */
+.lp-btn {
+  transition: background var(--lp-dur-1) var(--lp-ease), border-color var(--lp-dur-1) var(--lp-ease),
+    box-shadow var(--lp-dur-1) var(--lp-ease), transform var(--lp-dur-1) var(--lp-ease);
+}
+.lp-btn:active:not(:disabled),
+.lp-seg:active:not(:disabled),
+.lp-btn-icon:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.lp-btn-primary:hover:not(:disabled) {
+  box-shadow: 0 2px 10px rgba(0, 229, 168, 0.32);
+}
+.lp-btn-primary:active:not(:disabled) {
+  box-shadow: 0 1px 4px rgba(0, 229, 168, 0.24);
+}
+
+/* ---------- 键盘焦点：统一可见环 ---------- */
+/* 鼠标点击不出现（focus-visible 只对键盘触发），Tab 导航时全部可交互件同一语言 */
+.lp-btn:focus-visible,
+.lp-seg:focus-visible,
+.lp-nav-item:focus-visible,
+.lp-case-item:focus-visible,
+.lp-material-item:focus-visible,
+.lp-chip:focus-visible,
+.lp-cue:focus-visible,
+.lp-radio-card:focus-visible,
+.lp-entry-card:focus-visible,
+.lp-home-project:focus-visible,
+.lp-home-more:focus-visible {
+  outline: 2px solid var(--lp-mint);
+  outline-offset: 2px;
+}
+
+/* ---------- 动效降级：系统要求减少动态效果时全部关停 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .lp-rise,
+  .lp-d1, .lp-d2, .lp-d3, .lp-d4 {
+    animation: none;
+  }
 }

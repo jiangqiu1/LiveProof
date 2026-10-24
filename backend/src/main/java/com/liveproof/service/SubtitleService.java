@@ -71,7 +71,7 @@ public class SubtitleService {
                 throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "SUBTITLE_READ_FAILED",
                         "素材登记的字幕文件缺失：" + material.getSrtFileName());
             }
-            return read(videoName, material.getSrtFileName(), path);
+            return read(videoName, material.getSrtFileName(), path, SubtitleResponse.SOURCE_UPLOADED);
         }
 
         // 2. 静态白名单映射（内置示例素材配套的 SRT）
@@ -79,7 +79,7 @@ public class SubtitleService {
         if (mapped.isPresent()) {
             Path path = mediaProperties.resolveSubtitle(mapped.get())
                     .orElseThrow(() -> NotFoundException.subtitleNotFound(videoName));
-            return read(videoName, mapped.get(), path);
+            return read(videoName, mapped.get(), path, SubtitleResponse.SOURCE_MAPPING);
         }
 
         // 3. 兼容旧写法：文件名固定为 {标识}.srt，只接受安全字符，不接受任何路径片段
@@ -88,7 +88,7 @@ public class SubtitleService {
             Path root = materialProperties.root();
             Path path = root.resolve(materialSrt).normalize();
             if (path.startsWith(root) && Files.isRegularFile(path)) {
-                return read(videoName, materialSrt, path);
+                return read(videoName, materialSrt, path, SubtitleResponse.SOURCE_LEGACY);
             }
         }
         throw NotFoundException.subtitleNotFound(videoName);
@@ -113,7 +113,7 @@ public class SubtitleService {
         return materialMapper.selectOne(wrapper);
     }
 
-    private SubtitleResponse read(String videoName, String subtitleName, Path path) {
+    private SubtitleResponse read(String videoName, String subtitleName, Path path, String source) {
         List<SubtitleCue> cues;
         try {
             cues = parse(Files.readString(path, StandardCharsets.UTF_8));
@@ -121,7 +121,7 @@ public class SubtitleService {
             log.error("读取字幕失败：{}", path, e);
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "SUBTITLE_READ_FAILED", "字幕读取失败");
         }
-        return new SubtitleResponse(videoName, subtitleName, "zh", cues.size(), cues);
+        return new SubtitleResponse(videoName, subtitleName, source, "zh", cues.size(), cues);
     }
 
     /** 解析 SRT 文本。容忍 BOM、CRLF、多余空行与缺失序号。 */

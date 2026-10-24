@@ -38,7 +38,8 @@ class CaseApiTest extends ApiTestBase {
                 .andExpect(jsonPath("$[*].startSec", everyItem(isA(Number.class))))
                 .andExpect(jsonPath("$[*].endSec", everyItem(isA(Number.class))))
                 .andExpect(jsonPath("$[0].reviewStatus", notNullValue()))
-                .andExpect(jsonPath("$[0].answerStatus", notNullValue()))
+                // answerStatus 不在这里断言非空：V8 起「尚未核验」就是 null，
+                // 由 unreviewedCaseHasNullAnswerStatus 单独守住这条语义
                 .andExpect(jsonPath("$[0].evidenceType", notNullValue()))
                 .andExpect(jsonPath("$[0].evidenceSufficiency", notNullValue()));
     }
@@ -80,12 +81,17 @@ class CaseApiTest extends ApiTestBase {
     }
 
     @Test
-    @DisplayName("按回答状态过滤")
+    @DisplayName("按回答状态过滤：未核验的行不会出现在 not_found 结果里")
     void filterByAnswerStatus() throws Exception {
+        // V8 之前 cf-failed-records-export 是 unreviewed + not_found，会被这个过滤命中；
+        // 现在它落 NULL，过滤 not_found 必须查不到任何行，否则「没核验」又被算成「没找到回答」
         mockMvc.perform(get("/api/cases").param("answerStatus", "not_found"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", hasSize(1)))
-                .andExpect(jsonPath("$[0].id", org.hamcrest.Matchers.is("cf-failed-records-export")));
+                .andExpect(jsonPath("$", hasSize(0)));
+
+        mockMvc.perform(get("/api/cases").param("answerStatus", "answered"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(5)));
     }
 
     @Test
@@ -140,5 +146,20 @@ class CaseApiTest extends ApiTestBase {
     void notEmpty() throws Exception {
         mockMvc.perform(get("/api/cases"))
                 .andExpect(jsonPath("$.length()", greaterThan(0)));
+    }
+
+    @Test
+    @DisplayName("尚未核验的事项 answerStatus 为 null，不被当成「未找到回答」")
+    void unreviewedCaseHasNullAnswerStatus() throws Exception {
+        // V8 之前这一行是 unreviewed + not_found，界面上直接显示「未找到回答」，
+        // 和「核验过、确认视频里没有回答」长得一模一样。这条断言把两者钉死。
+        //
+        // 断言写法说明：Spring 的 jsonPath(...).value(nullValue()) 对显式 null 会报
+        // "No value at JSON path"，必须用 doesNotExist —— 它把「值为 null」和
+        // 「字段不存在」都视为没有值，正好符合这里的校验目的。
+        mockMvc.perform(get("/api/cases/cf-failed-records-export"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reviewStatus", org.hamcrest.Matchers.is("unreviewed")))
+                .andExpect(jsonPath("$.answerStatus").doesNotExist());
     }
 }

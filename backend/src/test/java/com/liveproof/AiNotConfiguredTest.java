@@ -24,6 +24,14 @@ class AiNotConfiguredTest extends ApiTestBase {
     }
 
     @Test
+    @DisplayName("未配置密钥时候选事项生成返回 503，不返回任何示例候选")
+    void candidateGenerationRequiresConfiguration() throws Exception {
+        mockMvc.perform(post("/api/ai/case-candidates").param("materialId", "mat_builtin_demo"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error.code").value("AI_NOT_CONFIGURED"));
+    }
+
+    @Test
     @DisplayName("状态接口如实报告未配置，并说明 FFmpeg 情况")
     void statusReportsNotConfigured() throws Exception {
         mockMvc.perform(get("/api/ai/status"))

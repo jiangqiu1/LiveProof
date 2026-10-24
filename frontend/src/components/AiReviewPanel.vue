@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type {
   AiAdoptPayload,
   AiEvidenceItem,
@@ -11,6 +11,7 @@ import type {
 import { fetchAiStatus, requestAiReview } from '@/api'
 import { ApiError, describeError } from '@/api/client'
 import { useWorkbenchStore } from '@/stores/workbench'
+import { CANNOT_PROVE_LABEL, SUPPORTS_LABEL, cannotProveText, supportsText } from '@/utils/aiEvidence'
 import {
   ANSWER_STATUS_LABEL,
   EVIDENCE_SUFFICIENCY_LABEL,
@@ -43,6 +44,125 @@ const subtitleSourceLabel = computed(() =>
 const analyzing = ref(false)
 const error = ref<{ code: string; message: string } | null>(null)
 const result = ref<AiReviewResponse | null>(null)
+
+/**
+ * 折叠状态只影响展示，不参与请求与结果生命周期。
+ *
+ * <p>刻意放在本组件内部而不是提到 {@code ReviewPanel}：AI 的请求、结果与采纳逻辑都在这里，
+ * 折叠只是它自己的一块 UI 状态，父组件不需要知道。折叠不清空 {@code result}、
+ * 不触发 {@code analyze()}，重新展开不会重新请求。
+ */
+const expanded = ref(true)
+
+const toggleExpanded = () => {
+  expanded.value = !expanded.value
+}
+
+/**
+ * 「AI 辅助核验」标题后问号所打开的说明浮层。
+ *
+ * <p>说明与模型信息原先直接铺在展开区顶部，实测占掉约 100px，一屏只剩摘要。
+ * 收进浮层后内容一条不少，但不再挤占结果的可视高度。
+ *
+ * <p>用 Teleport + fixed 定位：{@code .lp-ai-fold} 自身是 {@code overflow: auto}，
+ * 浮层若留在里面会被裁切，或把折叠区撑出一条多余的滚动条。
+ */
+const tipOpen = ref(false)
+/**
+ * 钉住状态：点击问号后浮层不随鼠标移开而关闭。
+ *
+ * <p>没有它会出现「鼠标移上去浮层已打开，点一下反而关了」——因为 hover 与 click
+ * 都在操作同一个开关。钉住后两者语义分开：hover 是临时查看，click 是锁定查看。
+ */
+const tipPinned = ref(false)
+const helpRef = ref<HTMLElement | null>(null)
+const tipStyle = ref<Record<string, string>>({})
+let tipCloseTimer: number | undefined
+
+function placeTip() {
+  const el = helpRef.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  const margin = 8
+  // 窄视口下 320 可能放不下，兜底收到视口内
+  const width = Math.min(320, window.innerWidth - margin * 2)
+  // 问号贴在右栏右缘，320 宽的浮层只能向左翻；用 min/max 保证两侧都不越界
+  const left = Math.min(Math.max(margin, rect.left - 24), window.innerWidth - width - margin)
+  // 箭头按问号中心在浮层内的相对位置摆，浮层向左翻时也能指向按钮
+  const arrowX = Math.min(Math.max(12, rect.left + rect.width / 2 - left - 4.5), width - 21)
+  tipStyle.value = {
+    top: `${Math.round(rect.bottom + 6)}px`,
+    left: `${Math.round(left)}px`,
+    width: `${width}px`,
+    '--lp-tip-arrow-x': `${Math.round(arrowX)}px`,
+  }
+}
+
+function openTip() {
+  window.clearTimeout(tipCloseTimer)
+  placeTip()
+  tipOpen.value = true
+}
+
+/**
+ * 延迟关闭：指针从问号移向浮层时会先触发按钮的 mouseleave，
+ * 若立刻关闭就没有机会把指针移到浮层上，故留 160ms 跨过中间那 6px 间隙。
+ */
+function scheduleCloseTip() {
+  if (tipPinned.value) return
+  window.clearTimeout(tipCloseTimer)
+  tipCloseTimer = window.setTimeout(() => {
+    tipOpen.value = false
+  }, 160)
+}
+
+function closeTip() {
+  window.clearTimeout(tipCloseTimer)
+  tipPinned.value = false
+  tipOpen.value = false
+}
+
+function toggleTip() {
+  if (tipPinned.value) {
+    closeTip()
+    return
+  }
+  tipPinned.value = true
+  openTip()
+}
+
+function onDocumentPointerDown(event: MouseEvent) {
+  const target = event.target as HTMLElement | null
+  if (!target) return
+  if (helpRef.value?.contains(target)) return
+  if (target.closest?.('.lp-ai-tip')) return
+  closeTip()
+}
+
+function onDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeTip()
+}
+
+/** 浮层是 fixed 定位，页面一滚或窗口一改尺寸就与问号脱位，直接关掉比让它飘着更清楚 */
+function onDocumentScroll() {
+  if (tipOpen.value) closeTip()
+}
+
+onMounted(() => {
+  loadStatus()
+  document.addEventListener('pointerdown', onDocumentPointerDown)
+  document.addEventListener('keydown', onDocumentKeydown)
+  window.addEventListener('scroll', onDocumentScroll, true)
+  window.addEventListener('resize', onDocumentScroll, true)
+})
+
+onBeforeUnmount(() => {
+  window.clearTimeout(tipCloseTimer)
+  document.removeEventListener('pointerdown', onDocumentPointerDown)
+  document.removeEventListener('keydown', onDocumentKeydown)
+  window.removeEventListener('scroll', onDocumentScroll, true)
+  window.removeEventListener('resize', onDocumentScroll, true)
+})
 
 const adopt = ref({
   answerStatus: true,
@@ -197,6 +317,14 @@ function outsideLabel(item: AiEvidenceItem): string {
   return item.outsideWindow ? '原时间区间之外' : ''
 }
 
+/**
+ * 「不能证明」那行的正文。
+ *
+ * <p>模板里已经写死了标签「不能证明」，而模型经常把这句话本身也写进 {@code cannotProve}
+ * （实测 5 条里有 4 条以「不能证明」开头），拼起来就成了「不能证明不能证明……」。
+ * 去重规则放在 {@code @/utils/aiEvidence}，那里能被验证脚本直接调用。
+ */
+
 watch(
   () => props.detail?.id,
   () => {
@@ -212,17 +340,53 @@ watch(
     resetResult()
   },
 )
-
-onMounted(loadStatus)
 </script>
 
 <template>
-  <div class="lp-ai">
+  <div class="lp-ai" :class="{ 'is-collapsed': !expanded }">
     <div class="lp-ai-head">
       <div class="lp-ai-title">
+        <button
+          type="button"
+          class="lp-ai-toggle"
+          :aria-expanded="expanded"
+          aria-controls="lp-ai-fold"
+          :title="expanded ? '折叠 AI 建议' : '展开 AI 建议'"
+          @click="toggleExpanded"
+        >
+          <svg
+            class="lp-ai-chev"
+            :class="{ 'is-open': expanded }"
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M9 6l6 6-6 6" />
+          </svg>
+        </button>
         <span class="lp-ai-mark">AI</span>
         <span>辅助核验</span>
         <span class="lp-pill" :class="statusTone">{{ statusLabel }}</span>
+        <button
+          ref="helpRef"
+          type="button"
+          class="lp-ai-help"
+          aria-label="AI 辅助核验的说明"
+          :aria-expanded="tipOpen"
+          @mouseenter="openTip"
+          @mouseleave="scheduleCloseTip"
+          @focus="openTip"
+          @blur="scheduleCloseTip"
+          @click="toggleTip"
+        >
+          ?
+        </button>
       </div>
       <button
         type="button"
@@ -236,11 +400,11 @@ onMounted(loadStatus)
       </button>
     </div>
 
-    <div class="lp-ai-sub">
-      AI 只提出建议：不会修改「核验进度」，也不会自动保存。采纳后仍需点击「保存核验结果」。
-      本次定位使用：{{ subtitleSourceLabel }}（在工作台字幕面板可切换）。
-    </div>
-
+    <!--
+      折叠只收起「解释性内容」，下面这几类任何时候都可见：
+      状态读取失败、未配置说明、运行中、请求错误、已有结果的一行摘要。
+      否则用户在折叠状态点「AI 辅助核验」，失败后看不到任何反馈。
+    -->
     <div v-if="statusError" class="lp-note warn">无法读取 AI 能力状态：{{ statusError }}</div>
 
     <div v-else-if="status && !status.configured" class="lp-note warn">
@@ -249,11 +413,6 @@ onMounted(loadStatus)
         模型：{{ status.model }} · 服务：{{ status.endpointHost }} ·
         FFmpeg：{{ status.ffmpegAvailable ? '可用' : '不可用（只能基于字幕判断）' }}
       </div>
-    </div>
-
-    <div v-else-if="status" class="lp-ai-meta">
-      模型 {{ status.model }} · 服务 {{ status.endpointHost }} · 关键帧上限
-      {{ status.maxFrames }} 帧 · FFmpeg {{ status.ffmpegAvailable ? '可用' : '不可用' }}
     </div>
 
     <div v-if="analyzing" class="lp-ai-loading">
@@ -277,141 +436,184 @@ onMounted(loadStatus)
       </div>
     </div>
 
-    <div v-if="suggestion && context" class="lp-ai-result">
-      <div class="lp-ai-summary">{{ suggestion.summary }}</div>
+    <!-- 折叠后仍让用户知道「已经分析过、结果还在」 -->
+    <div v-if="!expanded && suggestion" class="lp-ai-folded">
+      已有分析结果（未展开，不会重新请求）
+      <button type="button" class="lp-btn lp-btn-text" style="height: 22px" @click="toggleExpanded">
+        展开查看
+      </button>
+    </div>
 
-      <div class="lp-ai-adopt">
-        <label class="lp-ai-row">
-          <el-checkbox v-model="adopt.answerStatus" size="small" />
-          <span class="k">回答状态</span>
-          <span class="lp-pill ink">{{ ANSWER_STATUS_LABEL[suggestion.answerStatus] }}</span>
-          <span v-if="detail && detail.answerStatus !== suggestion.answerStatus" class="old">
-            当前 {{ ANSWER_STATUS_LABEL[detail.answerStatus] }}
-          </span>
-        </label>
-        <label class="lp-ai-row">
-          <el-checkbox v-model="adopt.evidenceType" size="small" />
-          <span class="k">证据形态</span>
-          <span class="lp-pill ink">{{ EVIDENCE_TYPE_LABEL[suggestion.evidenceType] }}</span>
-          <span v-if="detail && detail.evidenceType !== suggestion.evidenceType" class="old">
-            当前 {{ EVIDENCE_TYPE_LABEL[detail.evidenceType] }}
-          </span>
-        </label>
-        <label class="lp-ai-row">
-          <el-checkbox v-model="adopt.evidenceSufficiency" size="small" />
-          <span class="k">证据充分性</span>
-          <span class="lp-pill" :class="suggestion.evidenceSufficiency === 'sufficient' ? 'mint' : 'warn'">
-            {{ EVIDENCE_SUFFICIENCY_LABEL[suggestion.evidenceSufficiency] }}
-          </span>
-          <span v-if="detail && detail.evidenceSufficiency !== suggestion.evidenceSufficiency" class="old">
-            当前 {{ EVIDENCE_SUFFICIENCY_LABEL[detail.evidenceSufficiency] }}
-          </span>
-        </label>
-      </div>
+    <div v-if="expanded" id="lp-ai-fold" class="lp-ai-fold">
+      <div v-if="suggestion && context" class="lp-ai-result">
+        <div class="lp-ai-summary">{{ suggestion.summary }}</div>
 
-      <div class="lp-ai-block">
-        <div class="lp-ai-block-head">
-          <label class="lp-ai-row" style="gap: 6px">
-            <el-checkbox v-model="adopt.reasoning" size="small" />
-            <span class="k">AI 判断依据</span>
+        <div class="lp-ai-adopt">
+          <label class="lp-ai-row">
+            <el-checkbox v-model="adopt.answerStatus" size="small" />
+            <span class="k">回答状态</span>
+            <span class="lp-pill ink">{{ ANSWER_STATUS_LABEL[suggestion.answerStatus] }}</span>
+            <span v-if="detail && detail.answerStatus !== suggestion.answerStatus" class="old">
+              当前 {{ detail.answerStatus ? ANSWER_STATUS_LABEL[detail.answerStatus] : '尚未核验' }}
+            </span>
+          </label>
+          <label class="lp-ai-row">
+            <el-checkbox v-model="adopt.evidenceType" size="small" />
+            <span class="k">证据形态</span>
+            <span class="lp-pill ink">{{ EVIDENCE_TYPE_LABEL[suggestion.evidenceType] }}</span>
+            <span v-if="detail && detail.evidenceType !== suggestion.evidenceType" class="old">
+              当前 {{ EVIDENCE_TYPE_LABEL[detail.evidenceType] }}
+            </span>
+          </label>
+          <label class="lp-ai-row">
+            <el-checkbox v-model="adopt.evidenceSufficiency" size="small" />
+            <span class="k">证据充分性</span>
+            <span class="lp-pill" :class="suggestion.evidenceSufficiency === 'sufficient' ? 'mint' : 'warn'">
+              {{ EVIDENCE_SUFFICIENCY_LABEL[suggestion.evidenceSufficiency] }}
+            </span>
+            <span v-if="detail && detail.evidenceSufficiency !== suggestion.evidenceSufficiency" class="old">
+              当前 {{ EVIDENCE_SUFFICIENCY_LABEL[detail.evidenceSufficiency] }}
+            </span>
           </label>
         </div>
-        <div class="lp-ai-text">{{ suggestion.reasoning }}</div>
-      </div>
 
-      <div class="lp-ai-block">
-        <div class="lp-ai-block-head">
-          <label class="lp-ai-row" style="gap: 6px">
-            <el-checkbox v-model="adopt.limitations" size="small" />
-            <span class="k">局限与风险</span>
-          </label>
-        </div>
-        <div class="lp-ai-text">{{ suggestion.limitations }}</div>
-      </div>
-
-      <div v-if="suggestion.evidenceItems.length" class="lp-ai-block">
-        <div class="lp-ai-block-head"><span class="k">候选证据（点击时间跳转）</span></div>
-        <div v-for="(item, index) in suggestion.evidenceItems" :key="index" class="lp-ai-evidence">
-          <div class="lp-ai-evidence-head">
-            <button type="button" class="lp-chip" @click="emit('seek', item.startSec)">
-              {{ formatTime(item.startSec) }} - {{ formatTime(item.endSec) }}
-            </button>
-            <span v-if="outsideLabel(item)" class="lp-pill warn">{{ outsideLabel(item) }}</span>
+        <div class="lp-ai-block">
+          <div class="lp-ai-block-head">
+            <label class="lp-ai-row" style="gap: 6px">
+              <el-checkbox v-model="adopt.reasoning" size="small" />
+              <span class="k">AI 判断依据</span>
+            </label>
           </div>
-          <div v-if="item.subtitle" class="lp-ai-quote">字幕：{{ item.subtitle }}</div>
-          <div v-if="item.observation" class="lp-ai-quote">画面：{{ item.observation }}</div>
-          <div class="lp-ai-evidence-line"><b>能支持</b>{{ item.supports }}</div>
-          <div class="lp-ai-evidence-line"><b>不能证明</b>{{ item.cannotProve }}</div>
-          <figure v-if="frameOf(item)" class="lp-ai-frame">
-            <img :src="frameOf(item)!.dataUrl ?? ''" :alt="`关键帧 ${formatTime(item.frameSec ?? 0)}`" />
-            <figcaption>
-              提交给模型的关键帧 {{ formatTime(item.frameSec ?? 0) }}
-              <template v-if="frameOf(item)!.width">
-                · {{ frameOf(item)!.width }}×{{ frameOf(item)!.height }}
-              </template>
-            </figcaption>
-          </figure>
+          <div class="lp-ai-text">{{ suggestion.reasoning }}</div>
         </div>
-      </div>
 
-      <div v-if="suggestion.suggestedTimePoints.length" class="lp-ai-block">
-        <div class="lp-ai-block-head">
-          <label class="lp-ai-row" style="gap: 6px">
-            <el-checkbox v-model="adopt.timePoints" size="small" />
-            <span class="k">建议回看时间点</span>
-          </label>
+        <div class="lp-ai-block">
+          <div class="lp-ai-block-head">
+            <label class="lp-ai-row" style="gap: 6px">
+              <el-checkbox v-model="adopt.limitations" size="small" />
+              <span class="k">局限与风险</span>
+            </label>
+          </div>
+          <div class="lp-ai-text">{{ suggestion.limitations }}</div>
         </div>
-        <div class="lp-chip-row">
+
+        <div v-if="suggestion.evidenceItems.length" class="lp-ai-block">
+          <div class="lp-ai-block-head"><span class="k">候选证据（点击时间跳转）</span></div>
+          <div v-for="(item, index) in suggestion.evidenceItems" :key="index" class="lp-ai-evidence">
+            <div class="lp-ai-evidence-head">
+              <button type="button" class="lp-chip" @click="emit('seek', item.startSec)">
+                {{ formatTime(item.startSec) }} - {{ formatTime(item.endSec) }}
+              </button>
+              <span v-if="outsideLabel(item)" class="lp-pill warn">{{ outsideLabel(item) }}</span>
+            </div>
+            <div v-if="item.subtitle" class="lp-ai-quote">字幕：{{ item.subtitle }}</div>
+            <div v-if="item.observation" class="lp-ai-quote">画面：{{ item.observation }}</div>
+            <div v-if="supportsText(item.supports)" class="lp-ai-evidence-line">
+              <b>{{ SUPPORTS_LABEL }}</b>{{ supportsText(item.supports) }}
+            </div>
+            <div v-if="cannotProveText(item.cannotProve)" class="lp-ai-evidence-line">
+              <b>{{ CANNOT_PROVE_LABEL }}</b>{{ cannotProveText(item.cannotProve) }}
+            </div>
+            <figure v-if="frameOf(item)" class="lp-ai-frame">
+              <img :src="frameOf(item)!.dataUrl ?? ''" :alt="`关键帧 ${formatTime(item.frameSec ?? 0)}`" />
+              <figcaption>
+                提交给模型的关键帧 {{ formatTime(item.frameSec ?? 0) }}
+                <template v-if="frameOf(item)!.width">
+                  · {{ frameOf(item)!.width }}×{{ frameOf(item)!.height }}
+                </template>
+              </figcaption>
+            </figure>
+          </div>
+        </div>
+
+        <div v-if="suggestion.suggestedTimePoints.length" class="lp-ai-block">
+          <div class="lp-ai-block-head">
+            <label class="lp-ai-row" style="gap: 6px">
+              <el-checkbox v-model="adopt.timePoints" size="small" />
+              <span class="k">建议回看时间点</span>
+            </label>
+          </div>
+          <div class="lp-chip-row">
+            <button
+              v-for="point in suggestion.suggestedTimePoints"
+              :key="point"
+              type="button"
+              class="lp-chip"
+              @click="emit('seek', point)"
+            >
+              {{ formatTime(point) }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="suggestion.unresolvedQuestions.length" class="lp-ai-block">
+          <div class="lp-ai-block-head"><span class="k">仍需人工确认</span></div>
+          <ul class="lp-ai-list">
+            <li v-for="(question, index) in suggestion.unresolvedQuestions" :key="index">{{ question }}</li>
+          </ul>
+        </div>
+
+        <div v-if="result?.normalizationNotes.length" class="lp-ai-notes">
+          <div v-for="(note, index) in result.normalizationNotes" :key="index">· {{ note }}</div>
+        </div>
+
+        <div class="lp-ai-context">
+          分析范围：字幕 {{ context.cuesUsed.length }}/{{ context.totalCueCount }} 条 ·
+          来源 {{ context.subtitleSource === 'cloud' ? '保利威智能字幕' : '本地 SRT' }} ·
+          {{ context.visionUsed ? `关键帧 ${context.frames.length} 帧` : '未使用画面' }} ·
+          区间 {{ formatRange(detail?.startSec ?? null, detail?.endSec ?? null) }} ·
+          耗时 {{ (context.elapsedMs / 1000).toFixed(1) }}s
+          <template v-if="context.promptTokens">
+            · tokens {{ context.promptTokens }}/{{ context.completionTokens }}
+          </template>
+          <div v-if="context.frameNote" class="muted">{{ context.frameNote }}</div>
+        </div>
+
+        <div class="lp-ai-actions">
           <button
-            v-for="point in suggestion.suggestedTimePoints"
-            :key="point"
             type="button"
-            class="lp-chip"
-            @click="emit('seek', point)"
+            class="lp-btn lp-btn-primary"
+            style="height: 26px"
+            :disabled="selectedCount === 0 || saving"
+            @click="applySelection"
           >
-            {{ formatTime(point) }}
+            采纳并应用（{{ selectedCount }} 项）
           </button>
+          <button type="button" class="lp-btn" style="height: 26px" @click="resetResult">忽略建议</button>
         </div>
-      </div>
-
-      <div v-if="suggestion.unresolvedQuestions.length" class="lp-ai-block">
-        <div class="lp-ai-block-head"><span class="k">仍需人工确认</span></div>
-        <ul class="lp-ai-list">
-          <li v-for="(question, index) in suggestion.unresolvedQuestions" :key="index">{{ question }}</li>
-        </ul>
-      </div>
-
-      <div v-if="result?.normalizationNotes.length" class="lp-ai-notes">
-        <div v-for="(note, index) in result.normalizationNotes" :key="index">· {{ note }}</div>
-      </div>
-
-      <div class="lp-ai-context">
-        分析范围：字幕 {{ context.cuesUsed.length }}/{{ context.totalCueCount }} 条 ·
-        来源 {{ context.subtitleSource === 'cloud' ? '保利威智能字幕' : '本地 SRT' }} ·
-        {{ context.visionUsed ? `关键帧 ${context.frames.length} 帧` : '未使用画面' }} ·
-        区间 {{ formatRange(detail?.startSec ?? null, detail?.endSec ?? null) }} ·
-        耗时 {{ (context.elapsedMs / 1000).toFixed(1) }}s
-        <template v-if="context.promptTokens">
-          · tokens {{ context.promptTokens }}/{{ context.completionTokens }}
-        </template>
-        <div v-if="context.frameNote" class="muted">{{ context.frameNote }}</div>
-      </div>
-
-      <div class="lp-ai-actions">
-        <button
-          type="button"
-          class="lp-btn lp-btn-primary"
-          style="height: 26px"
-          :disabled="selectedCount === 0 || saving"
-          @click="applySelection"
-        >
-          采纳并应用（{{ selectedCount }} 项）
-        </button>
-        <button type="button" class="lp-btn" style="height: 26px" @click="resetResult">忽略建议</button>
-      </div>
-      <div class="lp-ai-foot">
-        采纳只会写入左侧编辑态，需要再点击「保存核验结果」才会落库；核验进度不会改变。
+        <div class="lp-ai-foot">
+          采纳只会写入左侧编辑态，需要再点击「保存核验结果」才会落库；核验进度不会改变。
+        </div>
       </div>
     </div>
+
+    <!--
+      说明浮层：由标题后的问号打开，hover 与点击都能触发。
+      Teleport 到 body 是为了绕开 .lp-ai-fold 的 overflow: auto，坐标由 placeTip() 按按钮位置算。
+    -->
+    <Teleport to="body">
+      <div
+        v-if="tipOpen"
+        class="lp-ai-tip"
+        role="tooltip"
+        :style="tipStyle"
+        @mouseenter="openTip"
+        @mouseleave="scheduleCloseTip"
+      >
+        <div class="lp-ai-sub">
+          AI 只提出建议：不会修改「核验进度」，也不会自动保存。采纳后仍需点击「保存核验结果」。
+        </div>
+        <div class="lp-ai-sub">
+          本次定位使用：{{ subtitleSourceLabel }}（在工作台字幕面板可切换）。
+        </div>
+        <div v-if="status && status.configured" class="lp-ai-meta">
+          模型 {{ status.model }}<br />
+          服务 {{ status.endpointHost }}<br />
+          关键帧上限 {{ status.maxFrames }} 帧 · FFmpeg
+          {{ status.ffmpegAvailable ? '可用' : '不可用（只能基于字幕判断）' }}
+        </div>
+        <div v-else-if="statusError" class="lp-ai-meta">AI 能力状态读取失败，暂时无法发起分析。</div>
+      </div>
+    </Teleport>
   </div>
 </template>

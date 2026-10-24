@@ -51,4 +51,15 @@ public final class AiErrors {
         return new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "AI_INVALID_RESPONSE",
                 "模型返回内容无法作为核验建议使用：" + detail);
     }
+
+    /**
+     * 素材没有可用字幕：<b>不是</b>故障，也不能降级成「没有候选」。
+     *
+     * <p>「提炼不出承诺」与「根本没有字幕可提炼」是两件不同的事，
+     * 前者是结果，后者是前置条件没满足。混用会让用户以为视频里真的没有承诺。
+     */
+    public static ApiException subtitleUnavailable(String detail) {
+        return new ApiException(HttpStatus.CONFLICT, "SUBTITLE_UNAVAILABLE",
+                "该素材没有可用字幕，无法从字幕提取候选事项：" + detail);
+    }
 }

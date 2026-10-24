@@ -280,7 +280,8 @@ public class ReportNarrativeService {
 
     private static String labelOf(AnswerStatus status) {
         if (status == null) {
-            return "未知";
+            // V8 起 NULL 只表示「尚未核验」，不能再说成「未知」，更不能落到 not_found
+            return "尚未核验";
         }
         return switch (status) {
             case ANSWERED -> "已回答";

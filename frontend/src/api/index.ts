@@ -1,7 +1,11 @@
 import { ApiError, http } from '@/api/client'
 import type {
+  AiCandidateResponse,
   AiReviewResponse,
   AiStatus,
+  CandidateSubtitleSource,
+  CaseCandidateBatchResult,
+  CaseCandidateItem,
   CaseCreatePayload,
   CaseDetail,
   CaseImportPolicy,
@@ -321,6 +325,48 @@ export async function requestAiReview(
       // 模型调用耗时远高于普通接口，单独放宽超时
       timeout: 120000,
     },
+  )
+  return data
+}
+
+/**
+ * POST /api/ai/case-candidates —— 从素材字幕提取候选核验事项。
+ *
+ * <p>只读：返回的是候选清单，不写库、不含任何核验结论。
+ * 用户勾选、编辑后走 {@link createCasesFromCandidates} 才落库。
+ *
+ * @param subtitleSource auto（默认，本地优先、没有就试云端）/ local / cloud
+ */
+export async function generateCaseCandidates(
+  materialId: string,
+  subtitleSource: CandidateSubtitleSource = 'auto',
+): Promise<AiCandidateResponse> {
+  const { data } = await http.post<AiCandidateResponse>(
+    '/api/ai/case-candidates',
+    undefined,
+    {
+      params: { materialId, subtitleSource },
+      // 整段字幕 + 模型推理，耗时与单条核验同量级
+      timeout: 120000,
+    },
+  )
+  return data
+}
+
+/**
+ * POST /api/cases/from-candidates —— 确认入库。
+ *
+ * <p>一次提交多条且要么全写入、要么整批拒绝；来源固定记 ai，
+ * 写进去的一律是「尚未核验」（answerStatus 为 null）。
+ */
+export async function createCasesFromCandidates(
+  materialId: string,
+  items: CaseCandidateItem[],
+): Promise<CaseCandidateBatchResult> {
+  const { data } = await http.post<CaseCandidateBatchResult>(
+    '/api/cases/from-candidates',
+    { materialId, items },
+    { timeout: 60000 },
   )
   return data
 }
